@@ -67,6 +67,53 @@ const knownRefusal = Schema.is(
     HistoryFreezeRefused,
   ]),
 );
+const diagnosticInteger = Schema.Int.check(
+  Schema.isBetween({ minimum: -2_147_483_648, maximum: 2_147_483_647 }),
+);
+const decodeRefusalDiagnostic = Schema.decodeUnknownOption(
+  Schema.Struct({
+    name: Schema.Literals(["Error", "TypeError", "RangeError", "SystemError"]),
+    code: Schema.Literals([
+      "ERR_SQLITE_ERROR",
+      "EACCES",
+      "EBUSY",
+      "ECANCELED",
+      "EDQUOT",
+      "EEXIST",
+      "EFBIG",
+      "EINVAL",
+      "EIO",
+      "EISDIR",
+      "ELOOP",
+      "EMFILE",
+      "ENAMETOOLONG",
+      "ENFILE",
+      "ENOENT",
+      "ENOSPC",
+      "ENOSYS",
+      "ENOTDIR",
+      "ENOTEMPTY",
+      "ENOTSUP",
+      "EPERM",
+      "EROFS",
+      "EXDEV",
+    ]),
+    errno: Schema.optionalKey(diagnosticInteger),
+    errcode: Schema.optionalKey(diagnosticInteger),
+  }),
+);
+function refusalDiagnostic(cause: unknown) {
+  for (let depth = 0; depth < 4 && isCaptureRefused(cause); depth++) cause = cause.cause;
+  const decoded = decodeRefusalDiagnostic(cause);
+  if (Option.isNone(decoded)) return undefined;
+  const { name, code, errno, errcode } = decoded.value;
+  return {
+    name,
+    code,
+    ...(errno === undefined ? {} : { errno }),
+    ...(errcode === undefined ? {} : { errcode }),
+  };
+}
 function refusalEntity(cause: unknown) {
   if (!knownRefusal(cause)) return undefined;
   switch (cause._tag) {
@@ -746,6 +793,7 @@ export const copyHistory = Effect.fn("history-handoff.copyHistory")(
       Effect.catch((cause) =>
         Effect.gen(function* () {
           const reason = knownRefusal(cause) ? cause.reason : "history-validation-failed";
+          const diagnostic = refusalDiagnostic(cause);
           const receiptPath = NodePath.join(claimed.operation.operationDirectory, "refusal.json");
           const receipt = yield* io(async () => {
             const handle = await NodeFSP.open(receiptPath, "w", 0o600);
@@ -756,6 +804,7 @@ export const copyHistory = Effect.fn("history-handoff.copyHistory")(
                   operationId: claimed.operation.id,
                   reason,
                   ...(refusalEntity(cause) === undefined ? {} : { entity: refusalEntity(cause) }),
+                  ...(diagnostic === undefined ? {} : { diagnostic }),
                 }),
               );
               await handle.sync();

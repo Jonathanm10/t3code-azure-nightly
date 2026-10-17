@@ -102,6 +102,7 @@ export function tableDigest(
 
 export function openCaptureJournal(filename: string) {
   const db = new NodeSqlite.DatabaseSync(filename);
+  db.exec("PRAGMA busy_timeout=5000");
   db.exec("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON");
   db.exec(`
     CREATE TABLE IF NOT EXISTS captured_tables (name TEXT PRIMARY KEY, count INTEGER NOT NULL, content TEXT NOT NULL, identities TEXT NOT NULL);

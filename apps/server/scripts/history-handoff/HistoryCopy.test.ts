@@ -10,7 +10,7 @@ import * as ProjectionStore from "../../src/orchestration-v2/ProjectionStore.ts"
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import { it, expect } from "@effect/vitest";
+import { it, expect, vi } from "@effect/vitest";
 import {
   CommandId,
   EventId,
@@ -24,7 +24,7 @@ import * as EventSink from "../../src/orchestration-v2/EventSink.ts";
 import { historyLayer } from "./HistoryFreeze.ts";
 import { now } from "./HistoryFreeze.fixture.ts";
 import { copyHistory } from "./HistoryCopy.ts";
-import { tableDigest } from "./HistoryCapture.ts";
+import { HistoryCaptureRefused, openCaptureJournal, tableDigest } from "./HistoryCapture.ts";
 import { resolveMediaSource } from "../../../../packages/client-runtime/src/mediaSource.ts";
 import {
   markdownAssetReferences,
@@ -34,6 +34,171 @@ import {
 } from "./HistoryReferences.ts";
 
 import { excludedStoreNames, fixture, png } from "./HistoryCopy.fixture.ts";
+
+function startJournalReader(filename: string) {
+  const child = NodeChildProcess.spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `import { DatabaseSync } from "node:sqlite";
+       const db = new DatabaseSync(process.argv[1], { readOnly: true });
+       db.exec("BEGIN; SELECT * FROM external_dependencies");
+       process.stdout.write("LOCKED\\n");
+       process.stdin.once("data", () => setTimeout(() => {
+         db.exec("ROLLBACK");
+         db.close();
+         process.stdin.destroy();
+       }, 100));`,
+      filename,
+    ],
+    { detached: true, stdio: ["pipe", "pipe", "pipe"], timeout: 10_000, killSignal: "SIGKILL" },
+  );
+  const pid = child.pid;
+  if (pid === undefined) throw new Error("No captured reader PID");
+  process.stdout.write(`Captured journal reader PID/PGID ${pid}/${pid} at launch.\n`);
+  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+    child.once("close", (code, signal) => resolve({ code, signal })),
+  );
+  const ready = new Promise<void>((resolve, reject) => {
+    let output = "";
+    child.stdout.on("data", (bytes) => {
+      output += String(bytes);
+      if (output.includes("LOCKED\n")) resolve();
+    });
+    child.once("error", reject);
+    child.once("close", () => reject(new Error("Journal reader exited before release")));
+  });
+  return {
+    ready,
+    exit,
+    release: () => child.stdin.end("release\n"),
+    async stop() {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exit;
+      expect(() => process.kill(-pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+      process.stdout.write(
+        `Captured journal reader PID/PGID ${pid}/${pid} exited; group absent.\n`,
+      );
+    },
+  };
+}
+
+it.effect.each(["brief", "persistent"] as const)(
+  "handles a %s shared reader with the native capture journal busy timeout",
+  (duration) =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const filename = NodePath.join(f.root, "contention.sqlite");
+      const journal = yield* Effect.acquireRelease(
+        Effect.sync(() => openCaptureJournal(filename)),
+        (db) => Effect.sync(() => db.close()),
+      );
+      const reader = yield* Effect.acquireRelease(
+        Effect.sync(() => startJournalReader(filename)),
+        (child) => Effect.promise(() => child.stop()),
+      );
+      yield* Effect.promise(() => reader.ready);
+      const insert =
+        "INSERT INTO external_dependencies VALUES ('project', 'ref', 'resolved', 'present')";
+      const immediate = new NodeSqlite.DatabaseSync(filename);
+      try {
+        expect(() => immediate.exec(insert)).toThrow(
+          expect.objectContaining({ code: "ERR_SQLITE_ERROR", errcode: 5 }),
+        );
+      } finally {
+        immediate.close();
+      }
+      if (duration === "persistent") {
+        journal.exec("PRAGMA busy_timeout=25");
+        expect(() => journal.exec(insert)).toThrow(
+          expect.objectContaining({ code: "ERR_SQLITE_ERROR", errcode: 5 }),
+        );
+        expect(journal.prepare("SELECT * FROM external_dependencies").all()).toEqual([]);
+        reader.release();
+      } else {
+        reader.release();
+        journal.exec(insert);
+        expect(journal.prepare("SELECT project_id FROM external_dependencies").all()).toEqual([
+          { project_id: "project" },
+        ]);
+      }
+      expect(yield* Effect.promise(() => reader.exit)).toEqual({ code: 0, signal: null });
+    }),
+);
+
+it.effect.each([
+  { name: "Error", code: "ERR_SQLITE_ERROR", errcode: 5 },
+  { name: "Error", code: "ENOSPC", errno: -28 },
+  { name: "Error", code: "PRIVATE_DIAGNOSTIC_SECRET", errno: -28 },
+  { name: "PRIVATE_DIAGNOSTIC_SECRET", code: "EACCES", errno: -13 },
+  { name: "Error", code: "EIO", errno: Number.POSITIVE_INFINITY },
+  { name: "Error", code: "EIO", errno: 1.5 },
+  { name: "Error", code: "EIO", errno: Number.MAX_SAFE_INTEGER + 1 },
+  { name: "Error", code: "EIO", errno: 2_147_483_648 },
+  { name: "Error", code: "EIO", errno: -5, wrappers: 4 },
+])("persists only safe error diagnostics for $name/$code/$errno/$errcode", (fields) =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    const secret = "PRIVATE_DIAGNOSTIC_SECRET";
+    const failure = Object.assign(new Error(secret), fields, {
+      stack: secret,
+      path: secret,
+      syscall: secret,
+      sql: secret,
+      nested: { secret },
+    });
+    const prepare = NodeSqlite.DatabaseSync.prototype.prepare;
+    yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        vi.spyOn(NodeSqlite.DatabaseSync.prototype, "prepare").mockImplementation(function (
+          this: NodeSqlite.DatabaseSync,
+          sql,
+        ) {
+          if (sql === "INSERT INTO asset_candidates VALUES (?, ?, ?, ?)") {
+            let cause: unknown = failure;
+            for (let depth = 0; depth < (fields.wrappers ?? 2); depth++)
+              cause = new HistoryCaptureRefused({ reason: "io-failure", cause });
+            throw cause;
+          }
+          return prepare.call(this, sql);
+        }),
+      ),
+      (spy) => Effect.sync(() => spy.mockRestore()),
+    );
+    const result = yield* copyHistory(f);
+    expect(result).toEqual({
+      kind: "refused",
+      reason: "io-failure",
+      receiptPath: NodePath.join(f.operationDirectory, "refusal.json"),
+    });
+    const receipt = yield* Effect.promise(() =>
+      NodeFSP.readFile(NodePath.join(f.operationDirectory, "refusal.json"), "utf8"),
+    );
+    expect(receipt).not.toContain(secret);
+    const expected =
+      fields.code === "ERR_SQLITE_ERROR" || fields.code === "ENOSPC" ? { diagnostic: fields } : {};
+    expect(JSON.parse(receipt)).toEqual({
+      version: 1,
+      operationId: expect.any(String),
+      reason: "io-failure",
+      ...expected,
+    });
+    expect(
+      (yield* Effect.promise(() =>
+        NodeFSP.stat(NodePath.join(f.operationDirectory, "refusal.json")),
+      )).mode & 0o777,
+    ).toBe(0o600);
+    expect(
+      yield* Effect.promise(() =>
+        NodeFSP.access(f.targetHome).then(
+          () => true,
+          () => false,
+        ),
+      ),
+    ).toBe(false);
+  }),
+);
 
 it("distinguishes real Markdown destinations, code literals, escaped links, file URIs and structured tool output", () => {
   const source = "/source/browser-artifacts/shot.png";
