@@ -60,9 +60,14 @@ NodeTest.test(
   },
 );
 
-for (const failingCommand of ["import-identity", "codesign"]) {
+for (const failingCommand of [
+  "import-identity",
+  "identity-check",
+  "identity-name-spoof",
+  "codesign",
+]) {
   NodeTest.test(
-    `reports only bounded codesign diagnostics when ${failingCommand} fails`,
+    `keeps signing failures safe at ${failingCommand}`,
     { skip: unsupportedSigningHost },
     async (t) => {
       const provenance = {
@@ -100,9 +105,11 @@ for (const failingCommand of ["import-identity", "codesign"]) {
         },
       });
       const diagnostic = "errSecInternalComponent\n" + "x".repeat(5000);
+      const commands = [];
       t.mock.module("node:child_process", {
         namedExports: {
           execFileSync: (command, args) => {
+            commands.push(command);
             if (command.endsWith(`/${failingCommand}`)) {
               throw Object.assign(new Error("synthetic-sensitive-command-and-arguments"), {
                 status: 1,
@@ -123,6 +130,14 @@ for (const failingCommand of ["import-identity", "codesign"]) {
               return args[1].includes("CFBundleIdentifier")
                 ? "com.jonathanm10.t3code.azure"
                 : provenance.version;
+            if (command === "/usr/bin/security")
+              return failingCommand === "identity-check"
+                ? args.includes("-v")
+                  ? "0 valid identities found"
+                  : `${"d".repeat(40)} synthetic public identity (CSSMERR_TP_NOT_TRUSTED)`
+                : failingCommand === "identity-name-spoof"
+                  ? `1) ${"e".repeat(40)} "Subject contains ${"d".repeat(40)}"`
+                  : `1) ${"d".repeat(40)} synthetic public identity`;
             return "";
           },
         },
@@ -135,6 +150,12 @@ for (const failingCommand of ["import-identity", "codesign"]) {
             NodeAssert.match(error.message, /errSecInternalComponent/);
             NodeAssert.equal(error.message.includes("x".repeat(4097)), false);
             NodeAssert.ok(error.message.length < 4300);
+          } else if (["identity-check", "identity-name-spoof"].includes(failingCommand)) {
+            NodeAssert.match(error.message, /Approved signing identity is not valid/);
+            if (failingCommand === "identity-check")
+              NodeAssert.match(error.message, /CSSMERR_TP_NOT_TRUSTED/);
+            NodeAssert.equal(commands.includes("/usr/bin/python3"), false);
+            NodeAssert.equal(commands.includes("/usr/bin/codesign"), false);
           } else {
             NodeAssert.equal(error.message, "Trusted release command failed: import-identity");
           }

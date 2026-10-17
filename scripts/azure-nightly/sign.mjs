@@ -97,6 +97,23 @@ try {
   run(helper, [keychain], { input: importPayload, stdio: ["pipe", "pipe", "pipe"] });
   for (const name of ["FORK_SIGNING_P12_BASE64", "FORK_SIGNING_P12_PASSWORD"])
     delete process.env[name];
+  const matchingIdentities = run("/usr/bin/security", [
+    "find-identity",
+    "-p",
+    "codesigning",
+    keychain,
+  ]);
+  const validIdentities = run("/usr/bin/security", [
+    "find-identity",
+    "-v",
+    "-p",
+    "codesigning",
+    keychain,
+  ]);
+  if (!new RegExp(`^\\s*\\d+\\)\\s+${identity}\\s`, "imu").test(validIdentities))
+    throw new Error(
+      `Approved signing identity is not valid in the ephemeral keychain. ${JSON.stringify({ matching: matchingIdentities.slice(0, 4096), valid: validIdentities.slice(0, 4096) })}`,
+    );
   run("/usr/bin/python3", [
     NodePath.join(controller, "extract-app.py"),
     archive,
