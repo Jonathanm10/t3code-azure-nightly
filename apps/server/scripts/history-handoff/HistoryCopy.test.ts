@@ -19,6 +19,7 @@ import {
   ProjectId,
   RunId,
   ThreadId,
+  StoredProjectIcon,
 } from "@t3tools/contracts";
 import * as EventSink from "../../src/orchestration-v2/EventSink.ts";
 import { historyLayer } from "./HistoryFreeze.ts";
@@ -1292,4 +1293,430 @@ it.effect("preserves file URI media fragment and query through canonical copy an
       db.close();
     }
   }),
+);
+
+it.effect(
+  "preserves historical provider goal defaults through strict replay without changing the source",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      for (const [id, goal] of [
+        ["parent:native", "absent"],
+        ["child:native", "null"],
+      ] as const) {
+        for (const [table, where] of [
+          ["orchestration_v2_projection_provider_threads", "provider_thread_id=?"],
+          [
+            "orchestration_events",
+            "event_type='provider-thread.updated' AND json_extract(payload_json,'$.id')=?",
+          ],
+        ]) {
+          f.database
+            .prepare(
+              `UPDATE ${table} SET payload_json=${goal === "absent" ? "json_remove(payload_json,'$.goal')" : "json_set(payload_json,'$.goal',NULL)"} WHERE ${where}`,
+            )
+            .run(id);
+        }
+      }
+      yield* Effect.gen(function* () {
+        const projection = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(
+          ThreadId.make("parent"),
+        );
+        yield* (yield* EventSink.EventSinkV2).write({
+          events: [
+            {
+              id: EventId.make("newer-thread-ownership"),
+              threadId: projection.thread.id,
+              type: "thread.metadata-updated",
+              occurredAt: now,
+              payload: {
+                ...projection.thread,
+                activeProviderThreadId: null,
+                updatedAt: DateTime.makeUnsafe("2026-10-17T10:01:00.000Z"),
+              },
+            },
+          ],
+        });
+      }).pipe(
+        Effect.provide(
+          historyLayer.pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: f.filename }))),
+        ),
+      );
+      const sourceEvents = tableDigest(f.database, "orchestration_events");
+      const sourceProviders = tableDigest(
+        f.database,
+        "orchestration_v2_projection_provider_threads",
+      );
+      const mainBefore = yield* Effect.promise(() => NodeFSP.readFile(f.filename));
+      const walBefore = yield* Effect.promise(() => NodeFSP.readFile(`${f.filename}-wal`));
+      const result = yield* copyHistory(f);
+      expect(result.kind, JSON.stringify(result)).toBe("installed");
+      if (result.kind !== "installed") return;
+      const target = new NodeSqlite.DatabaseSync(
+        NodePath.join(f.targetHome, "userdata", "statev2.sqlite"),
+        { readOnly: true },
+      );
+      const journal = new NodeSqlite.DatabaseSync(
+        NodePath.join(f.operationDirectory, "capture.sqlite"),
+        { readOnly: true },
+      );
+      try {
+        expect(
+          tableDigest(target, "orchestration_events", {
+            through: result.receipt.cut.applicationSequence,
+          }),
+        ).toEqual(sourceEvents);
+        expect(
+          target
+            .prepare(
+              "SELECT count(*) AS count FROM orchestration_events WHERE sequence > ? AND sequence <= ? AND event_type='provider-thread.updated' AND json_extract(payload_json,'$.id') IN ('parent:native','child:native','runless:native')",
+            )
+            .get(result.receipt.cut.applicationSequence, result.receipt.captureHead),
+        ).toEqual({ count: 0 });
+        expect(
+          journal
+            .prepare(
+              "SELECT count,content,identities FROM source_tables WHERE name='orchestration_v2_projection_provider_threads'",
+            )
+            .get(),
+        ).toEqual(sourceProviders);
+        expect(
+          journal
+            .prepare(
+              "SELECT changed_rows FROM replay_materializations WHERE kind='missing-provider-goal-to-null'",
+            )
+            .get(),
+        ).toEqual({ changed_rows: 1 });
+        for (const id of ["parent:native", "child:native"]) {
+          expect(
+            target
+              .prepare(
+                "SELECT json_type(payload_json,'$.goal') AS goal FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id=?",
+              )
+              .get(id),
+          ).toEqual({ goal: "null" });
+        }
+        expect(
+          target
+            .prepare(
+              "SELECT json_extract(payload_json,'$.goal') AS goal FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id='runless:native'",
+            )
+            .get(),
+        ).toEqual(
+          f.database
+            .prepare(
+              "SELECT json_extract(payload_json,'$.goal') AS goal FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id='runless:native'",
+            )
+            .get(),
+        );
+      } finally {
+        target.close();
+        journal.close();
+      }
+      expect(tableDigest(f.database, "orchestration_v2_projection_provider_threads")).toEqual(
+        sourceProviders,
+      );
+      expect(yield* Effect.promise(() => NodeFSP.readFile(f.filename))).toEqual(mainBefore);
+      expect(yield* Effect.promise(() => NodeFSP.readFile(`${f.filename}-wal`))).toEqual(walBefore);
+      expect(yield* copyHistory(f)).toMatchObject({ kind: "already-installed" });
+    }),
+);
+
+it.effect(
+  "preserves captured project icons across incomplete baselines, nulls and deleted projects",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const icons: ReadonlyArray<typeof StoredProjectIcon.Type | null> = [
+        { kind: "lucide", name: "code", color: "blue" },
+        { kind: "emoji", emoji: "☃" },
+        { kind: "monogram", text: "AP", color: "rose" },
+        null,
+      ];
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        for (const [index, projectIcon] of icons.entries()) {
+          const projectId = ProjectId.make(`history-icon:${index}`);
+          const updatedAt = "2026-01-02T00:00:00.000Z";
+          const faviconPath = index === 0 ? `${f.sourceState}/browser-artifacts/shot.png` : null;
+          const created = {
+            projectId,
+            title: "Preserved project",
+            workspaceRoot: "/synthetic",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt,
+          };
+          for (const [name, payload] of [
+            ["original", { ...created, faviconPath, projectIcon }],
+            ["incomplete-baseline", created],
+          ] as const) {
+            const commandId = CommandId.make(`${projectId}:${name}`);
+            yield* sink.commitProjectCommand({
+              commandId,
+              projectId,
+              commandType: "fixture",
+              acceptedAt: now,
+              event: {
+                eventId: EventId.make(commandId),
+                aggregateKind: "project",
+                aggregateId: projectId,
+                occurredAt: updatedAt,
+                commandId,
+                causationEventId: null,
+                correlationId: null,
+                metadata: {},
+                type: "project.created",
+                payload,
+              },
+            });
+          }
+          if (index === 2) {
+            const commandId = CommandId.make(`${projectId}:deleted`);
+            yield* sink.commitProjectCommand({
+              commandId,
+              projectId,
+              commandType: "fixture",
+              acceptedAt: now,
+              event: {
+                eventId: EventId.make(commandId),
+                aggregateKind: "project",
+                aggregateId: projectId,
+                occurredAt: updatedAt,
+                commandId,
+                causationEventId: null,
+                correlationId: null,
+                metadata: {},
+                type: "project.deleted",
+                payload: { projectId, deletedAt: updatedAt },
+              },
+            });
+          }
+          f.database
+            .prepare(
+              "UPDATE projection_projects SET favicon_path=?,project_icon_json=? WHERE project_id=?",
+            )
+            .run(faviconPath, projectIcon === null ? null : JSON.stringify(projectIcon), projectId);
+        }
+      }).pipe(
+        Effect.provide(
+          historyLayer.pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: f.filename }))),
+        ),
+      );
+      const originals = f.database
+        .prepare(
+          "SELECT * FROM projection_projects WHERE project_id LIKE 'history-icon:%' ORDER BY project_id",
+        )
+        .all();
+      const sourceProjects = tableDigest(f.database, "projection_projects");
+      const result = yield* copyHistory(f);
+      expect(result.kind, JSON.stringify(result)).toBe("installed");
+      if (result.kind !== "installed") return;
+      const db = new NodeSqlite.DatabaseSync(
+        NodePath.join(f.targetHome, "userdata", "statev2.sqlite"),
+        { readOnly: true },
+      );
+      const journal = new NodeSqlite.DatabaseSync(
+        NodePath.join(f.operationDirectory, "capture.sqlite"),
+        { readOnly: true },
+      );
+      try {
+        for (const original of originals) {
+          if (original.project_id === undefined)
+            return yield* Effect.die("Missing project identity");
+          const relocated = original.favicon_path !== null;
+          expect(
+            db
+              .prepare("SELECT * FROM projection_projects WHERE project_id=?")
+              .get(original.project_id),
+          ).toEqual({
+            ...original,
+            ...(relocated
+              ? {
+                  favicon_path: `${f.targetHome}/userdata/browser-artifacts/shot.png`,
+                  updated_at: result.receipt.frozenAt,
+                }
+              : {}),
+          });
+        }
+        expect(
+          journal.prepare("SELECT count(*) AS count FROM project_preservations").get(),
+        ).toEqual({ count: 6 });
+        expect(
+          db
+            .prepare(
+              "SELECT count(*) AS count FROM orchestration_events WHERE sequence > ? AND event_type='project.meta-updated' AND command_id LIKE 'history-preserve:%'",
+            )
+            .get(result.receipt.cut.applicationSequence),
+        ).toEqual({ count: 6 });
+        expect(
+          db
+            .prepare(
+              "SELECT count(*) AS count FROM orchestration_command_receipts WHERE command_type='history.project-icons-preservation'",
+            )
+            .get(),
+        ).toEqual({ count: 6 });
+        expect(
+          db
+            .prepare(
+              "SELECT count(*) AS count FROM orchestration_command_receipts WHERE command_type='history.project-icons-preservation' AND accepted_at='2026-01-02T00:00:00.000Z'",
+            )
+            .get(),
+        ).toEqual({ count: 4 });
+      } finally {
+        db.close();
+        journal.close();
+      }
+      expect(tableDigest(f.database, "projection_projects")).toEqual(sourceProjects);
+    }),
+);
+
+it.effect.each([
+  "unknown-key",
+  "nested-unknown-key",
+  "missing-other-default",
+  "duplicate-key",
+  "unsafe-number",
+  "malformed",
+  "projection-drift",
+] as const)("refuses provider goal materialization with %s without publication", (kind) =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    const row = f.database
+      .prepare(
+        "SELECT payload_json FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id='parent:native'",
+      )
+      .get();
+    if (typeof row?.payload_json !== "string") return yield* Effect.die("Missing provider fixture");
+    const raw = JSON.parse(row.payload_json);
+    delete raw.goal;
+    if (kind === "unknown-key") raw.unknown = { retained: true };
+    if (kind === "nested-unknown-key") raw.pendingBackgroundTasks[0].unknown = "retained";
+    if (kind === "missing-other-default") delete raw.contextUsage;
+    if (kind === "projection-drift") raw.lastRunOrdinal = 7;
+    let payload = JSON.stringify(raw);
+    if (kind === "duplicate-key")
+      payload = payload.replace('"status":"active"', '"status":"closed","status":"active"');
+    if (kind === "unsafe-number")
+      payload = payload.replace('"firstRunOrdinal":1', '"firstRunOrdinal":9007199254740993');
+    if (kind === "malformed") payload = "{";
+    f.database
+      .prepare(
+        "UPDATE orchestration_v2_projection_provider_threads SET payload_json=? WHERE provider_thread_id='parent:native'",
+      )
+      .run(payload);
+    const before = tableDigest(f.database, "orchestration_v2_projection_provider_threads");
+    const result = yield* copyHistory(f);
+    expect(result.kind).toBe("refused");
+    if (kind === "projection-drift")
+      expect(result).toMatchObject({ reason: "projection-replay-mismatch" });
+    if (["unknown-key", "nested-unknown-key", "missing-other-default"].includes(kind))
+      expect(result).toMatchObject({ reason: "provider-goal-materialization-drift" });
+    if (["duplicate-key", "unsafe-number"].includes(kind))
+      expect(result).toMatchObject({ reason: "noncanonical-provider-goal-payload" });
+    expect(yield* Effect.promise(() => NodeFSP.readdir(f.root))).not.toContain("target");
+    expect(tableDigest(f.database, "orchestration_v2_projection_provider_threads")).toEqual(before);
+  }),
+);
+
+it.effect(
+  "recaptures after interrupted project preservation with one exact event and receipt per project",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const source = tableDigest(f.database, "orchestration_events");
+      const prepare = NodeSqlite.DatabaseSync.prototype.prepare;
+      const spy = vi
+        .spyOn(NodeSqlite.DatabaseSync.prototype, "prepare")
+        .mockImplementation(function (this: NodeSqlite.DatabaseSync, sql) {
+          if (sql === "INSERT INTO project_preservations VALUES (?, ?, ?, ?)")
+            throw new Error("Synthetic interruption after canonical preservation commit");
+          return prepare.call(this, sql);
+        });
+      try {
+        expect(yield* copyHistory(f)).toMatchObject({ kind: "refused" });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(yield* Effect.promise(() => NodeFSP.readdir(f.root))).not.toContain("target");
+      const result = yield* copyHistory(f);
+      expect(result.kind, JSON.stringify(result)).toBe("installed");
+      if (result.kind !== "installed") return;
+      const db = new NodeSqlite.DatabaseSync(
+        NodePath.join(f.targetHome, "userdata", "statev2.sqlite"),
+        { readOnly: true },
+      );
+      try {
+        expect(
+          db
+            .prepare(
+              "SELECT count(*) AS count FROM orchestration_events WHERE command_id LIKE 'history-preserve:%'",
+            )
+            .get(),
+        ).toEqual({ count: 2 });
+        expect(
+          db
+            .prepare(
+              "SELECT count(*) AS count FROM orchestration_command_receipts WHERE command_type='history.project-icons-preservation'",
+            )
+            .get(),
+        ).toEqual({ count: 2 });
+        expect(
+          tableDigest(db, "orchestration_events", {
+            through: result.receipt.cut.applicationSequence,
+          }),
+        ).toEqual(source);
+      } finally {
+        db.close();
+      }
+      expect(yield* copyHistory(f)).toMatchObject({ kind: "already-installed" });
+    }),
+);
+
+it.effect.each(["receipt", "event"] as const)(
+  "refuses a captured project preservation with a changed %s",
+  (kind) =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const child = yield* Effect.acquireRelease(
+        Effect.sync(() => startPausedCopy(f, "captured")),
+        (child) => Effect.promise(() => child.stop()),
+      );
+      yield* Effect.promise(() => child.barrier);
+      process.kill(-child.pid, "SIGKILL");
+      yield* Effect.promise(() => child.exit);
+      const receipt: unknown = JSON.parse(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(f.operationDirectory, "operation.json"), "utf8"),
+        ),
+      );
+      if (
+        typeof receipt !== "object" ||
+        receipt === null ||
+        !("stage" in receipt) ||
+        typeof receipt.stage !== "string"
+      )
+        return yield* Effect.die("Missing stage");
+      const db = new NodeSqlite.DatabaseSync(
+        NodePath.join(receipt.stage, "userdata", "statev2.sqlite"),
+      );
+      try {
+        if (kind === "receipt")
+          db.exec(
+            "UPDATE orchestration_command_receipts SET accepted_at='2026-01-01T00:00:00.000Z' WHERE command_type='history.project-icons-preservation'",
+          );
+        else
+          db.exec(
+            "UPDATE orchestration_events SET metadata_json=json_object('tampered',1) WHERE command_id LIKE 'history-preserve:%'",
+          );
+      } finally {
+        db.close();
+      }
+      expect(yield* copyHistory(f)).toMatchObject({
+        kind: "refused",
+        reason: "unowned-or-changed-command-receipt",
+      });
+      expect(yield* Effect.promise(() => NodeFSP.readdir(f.root))).not.toContain("target");
+    }),
 );

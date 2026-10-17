@@ -3,6 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
+import * as NodeUtil from "node:util";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -12,6 +13,7 @@ import {
   CommandId,
   EventId,
   OrchestrationV2DomainEventJson,
+  OrchestrationV2ProviderThreadJson,
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -26,6 +28,7 @@ import * as EventSink from "../../src/orchestration-v2/EventSink.ts";
 import * as EventStore from "../../src/orchestration-v2/EventStore.ts";
 import * as ProjectionMaintenance from "../../src/orchestration-v2/ProjectionMaintenance.ts";
 import * as ProjectStore from "../../src/orchestration-v2/ProjectStore.ts";
+import { encodeProviderThreadPayload } from "../../src/orchestration-v2/ProjectionStore.ts";
 import * as ApplicationEvents from "../../src/persistence/OrchestrationEventStore.ts";
 import {
   historyLayer,
@@ -221,6 +224,114 @@ const verifyRebuild = Effect.fnUntraced(function* (filename: string) {
   const after = yield* sync(() => projectionDigests(filename));
   if (encodeJson(before) !== encodeJson(after))
     return yield* new HistoryCaptureRefused({ reason: "projection-replay-mismatch" });
+});
+
+const preserveCapturedProjectIcons = Effect.fnUntraced(function* (
+  operationId: string,
+  filename: string,
+  journal: NodeSqlite.DatabaseSync,
+) {
+  const before = yield* sync(() => projectionDigests(filename));
+  const projects = yield* ProjectStore.ProjectStoreV2;
+  const sink = yield* EventSink.EventSinkV2;
+  const sql = yield* SqlClient.SqlClient;
+  yield* sync(() =>
+    journal.exec(`CREATE TABLE project_preservations (
+    command_id TEXT PRIMARY KEY, accepted_at TEXT NOT NULL,
+    result_sequence INTEGER NOT NULL, event_json TEXT NOT NULL
+  )`),
+  );
+  for (const project of yield* projects.list({ includeDeleted: true })) {
+    const { projectId, faviconPath, projectIcon, updatedAt } = project;
+    const commandId = CommandId.make(`history-preserve:${operationId}:project:${projectId}`);
+    const result = yield* sink.commitProjectCommand({
+      commandId,
+      projectId,
+      commandType: "history.project-icons-preservation",
+      acceptedAt: DateTime.makeUnsafe(updatedAt),
+      event: {
+        eventId: EventId.make(commandId),
+        aggregateKind: "project",
+        aggregateId: projectId,
+        occurredAt: updatedAt,
+        commandId,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "project.meta-updated",
+        payload: { projectId, faviconPath, projectIcon, updatedAt },
+      },
+    });
+    if (!result.committed)
+      return yield* new HistoryCaptureRefused({ reason: "project-preservation-command-collision" });
+    const events =
+      yield* sql`SELECT * FROM orchestration_events WHERE sequence = ${result.receipt.resultSequence}`;
+    yield* sync(() =>
+      journal
+        .prepare("INSERT INTO project_preservations VALUES (?, ?, ?, ?)")
+        .run(commandId, updatedAt, result.receipt.resultSequence, encodeJson(events[0])),
+    );
+  }
+  if (encodeJson(before) !== encodeJson(yield* sync(() => projectionDigests(filename))))
+    return yield* new HistoryCaptureRefused({ reason: "project-preservation-changed-projection" });
+});
+
+const materializeMissingProviderGoals = Effect.fnUntraced(function* (
+  filename: string,
+  journal: NodeSqlite.DatabaseSync,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const providerTable = "orchestration_v2_projection_provider_threads";
+  const digest = () => {
+    const db = new NodeSqlite.DatabaseSync(filename, { readOnly: true });
+    try {
+      return tableDigest(db, providerTable);
+    } finally {
+      db.close();
+    }
+  };
+  const before = yield* sync(digest);
+  const decodeProvider = Schema.decodeUnknownEffect(OrchestrationV2ProviderThreadJson);
+  let changedRows = 0;
+  let after = "";
+  for (;;) {
+    const rows = yield* sql<{ provider_thread_id: string; payload_json: string }>`
+      SELECT provider_thread_id,payload_json FROM orchestration_v2_projection_provider_threads
+      WHERE provider_thread_id > ${after} ORDER BY provider_thread_id LIMIT 32
+    `;
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      after = row.provider_thread_id;
+      const raw = yield* decodeJson(row.payload_json);
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+        return yield* new HistoryCaptureRefused({ reason: "invalid-provider-goal-payload" });
+      if (Object.hasOwn(raw, "goal")) continue;
+      // Historical projector output is canonical JSON. Refuse ambiguous keys or numeric loss.
+      if (encodeJson(raw) !== row.payload_json)
+        return yield* new HistoryCaptureRefused({ reason: "noncanonical-provider-goal-payload" });
+      const materialized = yield* encodeProviderThreadPayload(yield* decodeProvider(raw));
+      if (!NodeUtil.isDeepStrictEqual({ ...raw, goal: null }, yield* decodeJson(materialized)))
+        return yield* new HistoryCaptureRefused({ reason: "provider-goal-materialization-drift" });
+      yield* sql`UPDATE orchestration_v2_projection_provider_threads
+        SET payload_json = ${materialized} WHERE provider_thread_id = ${row.provider_thread_id}`;
+      changedRows++;
+    }
+  }
+  const afterDigest = yield* sync(digest);
+  yield* sync(() => {
+    journal.exec(`CREATE TABLE replay_materializations (
+      kind TEXT PRIMARY KEY, changed_rows INTEGER NOT NULL,
+      before_digest TEXT NOT NULL, after_digest TEXT NOT NULL
+    )`);
+    journal
+      .prepare("INSERT INTO replay_materializations VALUES (?, ?, ?, ?)")
+      .run(
+        "missing-provider-goal-to-null",
+        changedRows,
+        encodeJson(before),
+        encodeJson(afterDigest),
+      );
+  });
 });
 
 const rebaseHistory = Effect.fnUntraced(function* (
@@ -576,7 +687,11 @@ export const copyHistory = Effect.fn("history-handoff.copyHistory")(
             journal,
           }),
         );
-        yield* verifyRebuild(filename).pipe(Effect.provide(withHistory(filename)));
+        yield* Effect.gen(function* () {
+          yield* preserveCapturedProjectIcons(operation.id, filename, journal);
+          yield* materializeMissingProviderGoals(filename, journal);
+          yield* verifyRebuild(filename);
+        }).pipe(Effect.provide(withHistory(filename)));
         const captureHead = yield* Effect.gen(function* () {
           yield* hydrateLegacyHistory();
           return yield* (yield* EventStore.EventStoreV2).latestApplicationSequence;
@@ -670,7 +785,31 @@ export const copyHistory = Effect.fn("history-handoff.copyHistory")(
                   entity: table.name,
                 });
             }
-            const commands = new Map<string, { type: string; head?: number }>();
+            const commands = new Map<
+              string,
+              | {
+                  type: "history.project-icons-preservation";
+                  head: number;
+                  acceptedAt: string;
+                  eventJson: string;
+                }
+              | { type: "history.asset-relocation" | "history.copy-freeze"; head?: number }
+            >();
+            for (const row of journal.prepare("SELECT * FROM project_preservations").iterate()) {
+              if (
+                typeof row.command_id !== "string" ||
+                typeof row.accepted_at !== "string" ||
+                typeof row.result_sequence !== "number" ||
+                typeof row.event_json !== "string"
+              )
+                throw new HistoryCaptureRefused({ reason: "invalid-project-preservation-receipt" });
+              commands.set(row.command_id, {
+                type: "history.project-icons-preservation",
+                head: row.result_sequence,
+                acceptedAt: row.accepted_at,
+                eventJson: row.event_json,
+              });
+            }
             for (const row of journal.prepare("SELECT entity FROM rebases").iterate()) {
               if (typeof row.entity !== "string")
                 throw new HistoryCaptureRefused({ reason: "invalid-rebase-receipt" });
@@ -711,7 +850,12 @@ export const copyHistory = Effect.fn("history-handoff.copyHistory")(
                 expected === undefined ||
                 event === undefined ||
                 receipt.command_type !== expected.type ||
-                receipt.accepted_at !== prepared.frozenAt ||
+                receipt.accepted_at !==
+                  (expected.type === "history.project-icons-preservation"
+                    ? expected.acceptedAt
+                    : prepared.frozenAt) ||
+                (expected.type === "history.project-icons-preservation" &&
+                  encodeJson(event) !== expected.eventJson) ||
                 receipt.status !== "accepted" ||
                 receipt.error !== null ||
                 receipt.aggregate_kind !== event.aggregate_kind ||
