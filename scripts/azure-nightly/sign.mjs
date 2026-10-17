@@ -39,8 +39,13 @@ function run(command, args, options = {}) {
       timeout: 30 * 60_000,
       ...options,
     });
-  } catch {
-    throw new Error(`Trusted release command failed: ${NodePath.basename(command)}`);
+  } catch (error) {
+    const diagnostic =
+      command === "/usr/bin/codesign"
+        ? ` ${JSON.stringify({ status: error?.status ?? null, stderr: String(error?.stderr ?? "").slice(0, 4096) })}`
+        : "";
+    // oxlint-disable-next-line preserve-caught-error -- Subprocess causes can expose signing inputs and arguments.
+    throw new Error(`Trusted release command failed: ${NodePath.basename(command)}${diagnostic}`);
   }
 }
 const provenance = JSON.parse(
@@ -92,6 +97,32 @@ try {
   run(helper, [keychain], { input: importPayload, stdio: ["pipe", "pipe", "pipe"] });
   for (const name of ["FORK_SIGNING_P12_BASE64", "FORK_SIGNING_P12_PASSWORD"])
     delete process.env[name];
+  run("/usr/bin/security", [
+    "set-key-partition-list",
+    "-S",
+    "apple-tool:,apple:",
+    "-s",
+    "-k",
+    keychainPassword,
+    keychain,
+  ]);
+  const matchingIdentities = run("/usr/bin/security", [
+    "find-identity",
+    "-p",
+    "codesigning",
+    keychain,
+  ]);
+  const validIdentities = run("/usr/bin/security", [
+    "find-identity",
+    "-v",
+    "-p",
+    "codesigning",
+    keychain,
+  ]);
+  if (!new RegExp(`^\\s*\\d+\\)\\s+${identity}\\s`, "imu").test(validIdentities))
+    throw new Error(
+      `Approved signing identity is not valid in the ephemeral keychain. ${JSON.stringify({ matching: matchingIdentities.slice(0, 4096), valid: validIdentities.slice(0, 4096) })}`,
+    );
   run("/usr/bin/python3", [
     NodePath.join(controller, "extract-app.py"),
     archive,

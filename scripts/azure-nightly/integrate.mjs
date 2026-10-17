@@ -9,6 +9,7 @@ import {
 } from "./release-policy.mjs";
 
 const repository = process.env.GITHUB_REPOSITORY;
+const upstreamRepository = "pingdotgg/t3code";
 const token = process.env.GH_TOKEN;
 if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository) || !token)
   throw new Error("Fork repository and integration token are required.");
@@ -30,7 +31,7 @@ async function releases(repo) {
   }
   throw new Error("Release history exceeds the bounded lookup.");
 }
-const upstream = selectUpstreamNightly(await releases("t3tools/t3code"));
+const upstream = selectUpstreamNightly(await releases(upstreamRepository));
 const git = (args, env = {}) =>
   NodeChildProcess.execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
     cwd: candidate,
@@ -41,7 +42,12 @@ const git = (args, env = {}) =>
 const baseForkSha = git(["rev-parse", "HEAD"]);
 git(["config", "user.name", "Azure Nightly Integration"]);
 git(["config", "user.email", "azure-nightly@users.noreply.github.com"]);
-git(["fetch", "--no-tags", "https://github.com/t3tools/t3code.git", `refs/tags/${upstream.tag}`]);
+git([
+  "fetch",
+  "--no-tags",
+  `https://github.com/${upstreamRepository}.git`,
+  `refs/tags/${upstream.tag}`,
+]);
 const upstreamSha = git(["rev-parse", "FETCH_HEAD^{commit}"]);
 if (!/^[0-9a-f]{40}$/.test(upstreamSha)) throw new Error("Invalid upstream source commit.");
 const ownReleases = await releases(repository);

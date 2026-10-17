@@ -78,7 +78,7 @@ jobs:
       - name: Focused extraction, profile and release checks
         run: |
           node --experimental-test-module-mocks --test scripts/azure-nightly/release-policy.test.mjs scripts/azure-nightly/integrate.test.mjs scripts/azure-nightly/sign.test.mjs scripts/azure-nightly/publish.test.mjs
-          python3 -m unittest discover -s scripts/azure-nightly -p test_extract_app.py
+          python3 -B -m unittest discover -s scripts/azure-nightly -p test_extract_app.py
           vp test run scripts/build-desktop-artifact.test.ts -t 'unreviewed Electron|omits inherited passkey'
           vp test run apps/desktop/src/app/DesktopForkProfile.test.ts apps/desktop/src/app/DesktopUserData.test.ts apps/desktop/src/app/DesktopClerk.test.ts scripts/azure-nightly/artifact-export.test.ts packages/shared/src/providerAuthReturnUrl.test.ts packages/shared/src/codexAuthHandoff.test.ts packages/shared/src/promptLinks.test.ts apps/server/src/auth/EnvironmentAuth.test.ts
           vp exec --filter @t3tools/desktop -- tsc-rs --noEmit
