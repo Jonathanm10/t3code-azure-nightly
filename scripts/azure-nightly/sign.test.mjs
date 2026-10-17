@@ -62,6 +62,7 @@ NodeTest.test(
 
 for (const failingCommand of [
   "import-identity",
+  "key-access",
   "identity-check",
   "identity-name-spoof",
   "codesign",
@@ -110,7 +111,12 @@ for (const failingCommand of [
         namedExports: {
           execFileSync: (command, args) => {
             commands.push(command);
-            if (command.endsWith(`/${failingCommand}`)) {
+            if (
+              command.endsWith(`/${failingCommand}`) ||
+              (failingCommand === "key-access" &&
+                command === "/usr/bin/security" &&
+                args[0] === "set-key-partition-list")
+            ) {
               throw Object.assign(new Error("synthetic-sensitive-command-and-arguments"), {
                 status: 1,
                 stderr:
@@ -154,6 +160,10 @@ for (const failingCommand of [
             NodeAssert.match(error.message, /Approved signing identity is not valid/);
             if (failingCommand === "identity-check")
               NodeAssert.match(error.message, /CSSMERR_TP_NOT_TRUSTED/);
+            NodeAssert.equal(commands.includes("/usr/bin/python3"), false);
+            NodeAssert.equal(commands.includes("/usr/bin/codesign"), false);
+          } else if (failingCommand === "key-access") {
+            NodeAssert.equal(error.message, "Trusted release command failed: security");
             NodeAssert.equal(commands.includes("/usr/bin/python3"), false);
             NodeAssert.equal(commands.includes("/usr/bin/codesign"), false);
           } else {

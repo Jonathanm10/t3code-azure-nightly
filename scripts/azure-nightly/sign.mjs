@@ -97,6 +97,15 @@ try {
   run(helper, [keychain], { input: importPayload, stdio: ["pipe", "pipe", "pipe"] });
   for (const name of ["FORK_SIGNING_P12_BASE64", "FORK_SIGNING_P12_PASSWORD"])
     delete process.env[name];
+  run("/usr/bin/security", [
+    "set-key-partition-list",
+    "-S",
+    "apple-tool:,apple:",
+    "-s",
+    "-k",
+    keychainPassword,
+    keychain,
+  ]);
   const matchingIdentities = run("/usr/bin/security", [
     "find-identity",
     "-p",
