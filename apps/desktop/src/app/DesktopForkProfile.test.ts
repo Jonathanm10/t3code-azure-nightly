@@ -107,6 +107,110 @@ it("uses a separate normal fork identity without importing official data", () =>
   expect(profile.electronName).toBe("T3 Code Azure Nightly");
 });
 
+it("retains explicit and worktree development homes in the backend and Clerk stores", () => {
+  const input = fixture();
+  for (const developmentHome of [
+    NodePath.join(input.homeDirectory, "explicit-sandbox"),
+    NodePath.join(input.homeDirectory, ".t3", "worktrees", "first", ".t3"),
+    NodePath.join(input.homeDirectory, ".t3", "worktrees", "second", ".t3"),
+  ]) {
+    const env = { T3CODE_HOME: developmentHome };
+    const profile = initializeDesktopForkProfile({
+      ...input,
+      executablePath: "/development/Electron",
+      isDevelopment: true,
+      env,
+      app: { setName() {}, setPath() {}, setAsDefaultProtocolClient: () => true },
+      electronVersion: "44.4.5",
+      appVersion: "test",
+      pid: 123,
+    });
+    expect(env.T3CODE_HOME).toBe(developmentHome);
+    expect(profile.backendHome).toBe(developmentHome);
+    expect(profile.clerkStorage).toBe(NodePath.join(developmentHome, "userdata"));
+  }
+});
+
+it("rejects official development targets and aliases before creating profile files", () => {
+  const input = fixture();
+  const official = NodePath.join(input.homeDirectory, ".t3", "userdata");
+  NodeFS.mkdirSync(official, { recursive: true });
+  const alias = NodePath.join(input.homeDirectory, "alias");
+  NodeFS.symlinkSync(official, alias);
+  for (const developmentHome of [
+    NodePath.join(input.homeDirectory, ".t3"),
+    official,
+    NodePath.join(official, "nested"),
+    NodePath.join(input.homeDirectory, "Library", "Application Support", "t3code-v2"),
+    NodePath.join(input.homeDirectory, "Library", "Application Support", "T3 Code (Dev)"),
+    alias,
+  ]) {
+    expect(() =>
+      initializeDesktopForkProfile({
+        ...input,
+        executablePath: "/development/Electron",
+        isDevelopment: true,
+        env: { T3CODE_HOME: developmentHome },
+        app: { setName() {}, setPath() {}, setAsDefaultProtocolClient: () => true },
+        electronVersion: "44.4.5",
+        appVersion: "test",
+        pid: 123,
+      }),
+    ).toThrow();
+    expect(NodeFS.readdirSync(official)).toEqual([]);
+    expect(NodeFS.existsSync(NodePath.join(input.homeDirectory, ".t3-azure-nightly"))).toBe(false);
+  }
+});
+
+it("ignores the ambient official home in a normal packaged launch", () => {
+  const input = fixture();
+  const env = { T3CODE_HOME: NodePath.join(input.homeDirectory, ".t3") };
+  const profile = initializeDesktopForkProfile({
+    ...input,
+    executablePath: "/Applications/T3 Code (Azure Nightly).app/Contents/MacOS/Electron",
+    env,
+    app: { setName() {}, setPath() {}, setAsDefaultProtocolClient: () => true },
+    electronVersion: "44.4.5",
+    appVersion: "test",
+    pid: 123,
+  });
+  expect(env.T3CODE_HOME).toBe(profile.backendHome);
+  expect(profile.backendHome).toBe(
+    NodePath.join(input.homeDirectory, ".t3-azure-nightly", "default", "backend"),
+  );
+  expect(NodeFS.existsSync(NodePath.join(input.homeDirectory, ".t3"))).toBe(false);
+});
+
+it("rejects an unreviewed Electron before creating data or changing application state", () => {
+  const input = fixture();
+  const env = { T3CODE_HOME: NodePath.join(input.homeDirectory, "sandbox") };
+  const touched: string[] = [];
+  expect(() =>
+    initializeDesktopForkProfile({
+      ...input,
+      executablePath: "/development/Electron",
+      isDevelopment: true,
+      electronVersion: "44.4.6",
+      env,
+      app: {
+        setName: (name) => {
+          touched.push(name);
+        },
+        setPath: (name) => {
+          touched.push(name);
+        },
+        setAsDefaultProtocolClient: () => true,
+      },
+      appVersion: "test",
+      pid: 123,
+    }),
+  ).toThrow("reviewed Electron");
+  expect(touched).toEqual([]);
+  expect(env.T3CODE_HOME).toBe(NodePath.join(input.homeDirectory, "sandbox"));
+  expect(NodeFS.existsSync(NodePath.join(input.homeDirectory, "sandbox"))).toBe(false);
+  expect(NodeFS.existsSync(NodePath.join(input.homeDirectory, ".t3-azure-nightly"))).toBe(false);
+});
+
 it("binds native storage and Clerk inputs synchronously before allowing application startup", () => {
   const input = fixture();
   const events: string[] = [];

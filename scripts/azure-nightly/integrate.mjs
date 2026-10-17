@@ -87,14 +87,11 @@ if (
 }
 git(["merge", "--no-edit", "--no-ff", upstreamSha]);
 const sourceSha = git(["rev-parse", "HEAD"]);
-const upstreamVersion = JSON.parse(
-  NodeFS.readFileSync(NodePath.resolve(candidate, "apps/desktop/package.json"), "utf8"),
-).version;
 const existingVersions = ownReleases
   .filter((release) => /^v\d+\.\d+\.\d+(?:-nightly\.\d{8}\.\d+)?$/.test(release.tag_name))
   .map((release) => release.tag_name.slice(1));
 const version = nextForkVersion({
-  upstreamVersion,
+  upstreamVersion: upstream.tag.slice(1),
   existingVersions,
   date: new Date().toISOString().slice(0, 10).replaceAll("-", ""),
 });

@@ -3,6 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
+import { assertReviewedDesktopElectronVersion } from "../../../../scripts/lib/desktop-electron-version.ts";
 
 export const FORK_ID = "com.jonathanm10.t3code.azure";
 export const FORK_NAME = "T3 Code (Azure Nightly)";
@@ -42,6 +43,7 @@ export function resolveDesktopForkProfile(input: {
   readonly executablePath: string;
   readonly homeDirectory: string;
   readonly isDevelopment: boolean;
+  readonly developmentHome?: string | undefined;
 }): DesktopForkProfile {
   const executable = NodePath.resolve(input.executablePath);
   const segments = executable.split(NodePath.sep);
@@ -93,11 +95,41 @@ export function resolveDesktopForkProfile(input: {
     electronName = `${FORK_ELECTRON_NAME} Proof ${binding.profileId}`;
   }
   const dataRoot = kind === "isolated" ? NodePath.join(root, "data") : root;
+  const developmentHome =
+    input.isDevelopment && kind === "normal" ? input.developmentHome?.trim() : undefined;
+  const backendHome = developmentHome
+    ? NodePath.resolve(developmentHome)
+    : NodePath.join(dataRoot, "backend");
+  if (developmentHome) {
+    const officialHome = NodePath.join(input.homeDirectory, ".t3");
+    const officialDataDirectories = [
+      NodePath.join(officialHome, "userdata"),
+      NodePath.join(officialHome, "dev"),
+      ...[
+        NodePath.join(input.homeDirectory, "Library", "Application Support"),
+        NodePath.join(input.homeDirectory, "AppData", "Roaming"),
+        NodePath.join(input.homeDirectory, ".config"),
+      ].flatMap((appData) =>
+        ["t3code-v2", "t3code-dev", "t3code", "T3 Code (Alpha)", "T3 Code (Dev)"].map((name) =>
+          NodePath.join(appData, name),
+        ),
+      ),
+    ];
+    if (
+      backendHome === officialHome ||
+      officialDataDirectories.some(
+        (directory) =>
+          backendHome === directory || backendHome.startsWith(`${directory}${NodePath.sep}`),
+      )
+    ) {
+      throw new Error("Development home must not use an official T3 profile.");
+    }
+  }
   const paths = {
     userData: NodePath.join(dataRoot, "electron", "userData"),
     sessionData: NodePath.join(dataRoot, "electron", "sessionData"),
-    clerkStorage: NodePath.join(dataRoot, "backend", "userdata"),
-    backendHome: NodePath.join(dataRoot, "backend"),
+    clerkStorage: NodePath.join(backendHome, "userdata"),
+    backendHome,
     logs: NodePath.join(dataRoot, "logs"),
     crashDumps: NodePath.join(dataRoot, "crashes"),
     updateCache: NodePath.join(dataRoot, "updates"),
@@ -107,6 +139,8 @@ export function resolveDesktopForkProfile(input: {
     let ancestor = target;
     while (!NodeFS.existsSync(ancestor)) ancestor = NodePath.dirname(ancestor);
     assertRealPath(ancestor);
+  }
+  for (const target of Object.values(paths)) {
     NodeFS.mkdirSync(target, { recursive: true, mode: 0o700 });
     assertRealPath(target);
   }
@@ -127,10 +161,8 @@ export function initializeDesktopForkProfile(input: {
     setAsDefaultProtocolClient: (protocol: string, executable?: string, args?: string[]) => boolean;
   };
 }) {
-  if (input.electronVersion !== "44.4.5") {
-    throw new Error("Fork profile isolation requires a reviewed Electron 44.4.5 bootstrap.");
-  }
-  const profile = resolveDesktopForkProfile(input);
+  assertReviewedDesktopElectronVersion(input.electronVersion);
+  const profile = resolveDesktopForkProfile({ ...input, developmentHome: input.env.T3CODE_HOME });
   input.app.setName(profile.electronName);
   input.app.setPath("userData", profile.userData);
   input.app.setPath("sessionData", profile.sessionData);

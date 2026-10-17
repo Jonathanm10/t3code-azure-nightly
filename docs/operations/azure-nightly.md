@@ -49,6 +49,9 @@ and merges it into a candidate based on `azure-nightly`. Conflicts stop the run.
 The fork version advances past every existing fork version, including reserved
 drafts, and retains the supported `X.Y.Z-nightly.YYYYMMDD.N` format. Candidate
 installation, checks and packaging run in a separate job without signing secrets.
+Standalone tarballs are packed from the clean source before the four desktop release
+manifests are stamped or the production build generates files. Signing rejects
+standalone packages whose provenance records a dirty source tree.
 
 The signing job checks out only the trusted controller commit. It validates and
 extracts the candidate as data, imports the approved identity into an ephemeral
@@ -70,8 +73,14 @@ its assets. The release history lookup is bounded to 1,000 entries.
 
 Normal fork launches use `~/.t3-azure-nightly/default`. Launch state cannot select
 official `~/.t3`, official Electron profiles or Windows credential migration.
-Development has its own fork profile. The bootstrap requires Electron 44.4.5;
-review the native storage initialization order before upgrading that pin.
+Development retains the backend home selected by `--home-dir` or the worktree
+launcher, including worktrees under `~/.t3/worktrees`. Clerk uses that home's
+`userdata` directory. Official backend and Electron profile paths, including
+symlink aliases, are rejected before creating profile files. Electron development
+data remains in the separate fork profile. Both desktop build preparation and
+bootstrap require the reviewed Electron version in
+`scripts/lib/desktop-electron-version.ts`. Review native storage initialization
+order before upgrading that pin.
 
 For updater proof, place the unmodified signed application in this reserved layout
 using canonical real paths and no symlinked ancestors.

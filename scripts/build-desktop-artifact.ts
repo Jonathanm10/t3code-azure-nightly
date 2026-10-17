@@ -4,8 +4,6 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeCrypto from "node:crypto";
 import * as NodeModule from "node:module";
-// plist is CommonJS; Node cannot load its named exports from an ES module.
-import Plist from "plist";
 
 import {
   createPackageWithOptions,
@@ -17,7 +15,6 @@ import {
 
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
 import azureClientPackageJson from "../packages/azure-devops-server-client/package.json" with { type: "json" };
@@ -32,6 +29,7 @@ import {
   type WebAssetBrand,
 } from "./lib/brand-assets.ts";
 import { getDefaultBuildArch } from "./lib/build-target-arch.ts";
+import { assertReviewedDesktopElectronVersion } from "./lib/desktop-electron-version.ts";
 import {
   findInlinedExternalPackages,
   selectCliRuntimeExternalDependencies,
@@ -57,7 +55,6 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const DESKTOP_APP_ID = "com.jonathanm10.t3code.azure";
-const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
@@ -199,25 +196,6 @@ const getDefaultArch = Effect.fn("getDefaultArch")(function* (platform: typeof B
 
   return yield* getDefaultBuildArch(platform, config);
 });
-
-export class MacPasskeySigningConfigurationResolutionError extends Schema.TaggedError<MacPasskeySigningConfigurationResolutionError>()(
-  "MacPasskeySigningConfigurationResolutionError",
-  {
-    cause: Schema.Defect(),
-  },
-) {
-  static fromCause(
-    cause: unknown,
-  ): MacPasskeySigningConfigurationError | MacPasskeySigningConfigurationResolutionError {
-    return isMacPasskeySigningConfigurationError(cause)
-      ? cause
-      : new MacPasskeySigningConfigurationResolutionError({ cause });
-  }
-
-  override get message(): string {
-    return "Failed to resolve macOS passkey signing configuration.";
-  }
-}
 
 export class KeyringNativePackageMissingError extends Schema.TaggedError<KeyringNativePackageMissingError>()(
   "KeyringNativePackageMissingError",
@@ -650,17 +628,6 @@ export class MissingDesktopBuildInputError extends Schema.TaggedError<MissingDes
   }
 }
 
-export class MacProvisioningProfileNotFoundError extends Schema.TaggedError<MacProvisioningProfileNotFoundError>()(
-  "MacProvisioningProfileNotFoundError",
-  {
-    provisioningProfilePath: Schema.String,
-  },
-) {
-  override get message(): string {
-    return `macOS provisioning profile not found: ${this.provisioningProfilePath}`;
-  }
-}
-
 export class DesktopBuildDistDirectoryMissingError extends Schema.TaggedError<DesktopBuildDistDirectoryMissingError>()(
   "DesktopBuildDistDirectoryMissingError",
   {
@@ -948,7 +915,6 @@ interface StagePackageJson {
   readonly t3codeCommitHash: string;
   readonly t3codeAzureClientVersion: string;
   readonly t3codeAzureClientSourceCommit: string;
-  readonly t3codeWebAuthn?: MacWebAuthnEntitlements;
   readonly private: true;
   readonly packageManager: string;
   readonly description: string;
@@ -1115,285 +1081,6 @@ export const LINUX_CAPTURE_EXTRA_RESOURCES = [
 export const LINUX_BROWSER_SECRET_EXTRA_RESOURCES = [
   { from: "apps/desktop/prod-resources/browser-secret", to: "browser-secret" },
 ] as const;
-
-export interface MacPasskeySigningConfiguration {
-  readonly appId: string;
-  readonly teamId: string;
-  readonly rpDomains: readonly string[];
-  readonly provisioningProfilePath: string;
-}
-
-export const InvalidMacPasskeyRpDomainReason = Schema.Literals([
-  "empty",
-  "scheme-not-allowed",
-  "parse-failed",
-  "credentials-not-allowed",
-  "port-not-allowed",
-  "path-not-allowed",
-  "query-not-allowed",
-  "fragment-not-allowed",
-  "hostname-mismatch",
-]);
-export type InvalidMacPasskeyRpDomainReason = typeof InvalidMacPasskeyRpDomainReason.Type;
-
-export class InvalidMacPasskeyRpDomainError extends Schema.TaggedError<InvalidMacPasskeyRpDomainError>()(
-  "InvalidMacPasskeyRpDomainError",
-  {
-    reason: InvalidMacPasskeyRpDomainReason,
-    inputLength: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-    cause: Schema.optionalKey(Schema.Defect()),
-  },
-) {
-  override get message(): string {
-    return `Invalid passkey RP domain (${this.reason}).`;
-  }
-}
-
-export class InvalidAppleTeamIdError extends Schema.TaggedError<InvalidAppleTeamIdError>()(
-  "InvalidAppleTeamIdError",
-  {
-    teamId: Schema.String,
-  },
-) {
-  override get message(): string {
-    return `T3CODE_APPLE_TEAM_ID '${this.teamId}' must be a 10-character Apple Developer Team ID.`;
-  }
-}
-
-export class MissingMacPasskeyProvisioningProfileError extends Schema.TaggedError<MissingMacPasskeyProvisioningProfileError>()(
-  "MissingMacPasskeyProvisioningProfileError",
-  {},
-) {
-  override get message(): string {
-    return "T3CODE_MACOS_PROVISIONING_PROFILE must point to an Associated Domains provisioning profile.";
-  }
-}
-
-export class MissingMacPasskeyDomainConfigurationError extends Schema.TaggedError<MissingMacPasskeyDomainConfigurationError>()(
-  "MissingMacPasskeyDomainConfigurationError",
-  {},
-) {
-  override get message(): string {
-    return "T3CODE_CLERK_PUBLISHABLE_KEY or T3CODE_CLERK_PASSKEY_RP_DOMAINS is required for signed macOS passkey builds.";
-  }
-}
-
-export class InvalidMacPasskeyPublishableKeyError extends Schema.TaggedError<InvalidMacPasskeyPublishableKeyError>()(
-  "InvalidMacPasskeyPublishableKeyError",
-  {
-    cause: Schema.Defect(),
-  },
-) {
-  override get message(): string {
-    return "T3CODE_CLERK_PUBLISHABLE_KEY is invalid.";
-  }
-}
-
-export class MissingMacPasskeyRpDomainError extends Schema.TaggedError<MissingMacPasskeyRpDomainError>()(
-  "MissingMacPasskeyRpDomainError",
-  {},
-) {
-  override get message(): string {
-    return "At least one Clerk passkey RP domain is required.";
-  }
-}
-
-export const MacPasskeySigningConfigurationError = Schema.Union([
-  InvalidMacPasskeyRpDomainError,
-  InvalidAppleTeamIdError,
-  MissingMacPasskeyProvisioningProfileError,
-  MissingMacPasskeyDomainConfigurationError,
-  InvalidMacPasskeyPublishableKeyError,
-  MissingMacPasskeyRpDomainError,
-]);
-export type MacPasskeySigningConfigurationError = typeof MacPasskeySigningConfigurationError.Type;
-export const isMacPasskeySigningConfigurationError = Schema.is(MacPasskeySigningConfigurationError);
-
-function normalizePasskeyRpDomain(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  const inputLength = value.length;
-  if (normalized.length === 0) {
-    throw new InvalidMacPasskeyRpDomainError({ reason: "empty", inputLength });
-  }
-  if (/^[a-z][a-z\d+.-]*:\/\//u.test(normalized)) {
-    throw new InvalidMacPasskeyRpDomainError({
-      reason: "scheme-not-allowed",
-      inputLength,
-    });
-  }
-
-  let parsed: URL;
-  try {
-    parsed = new URL(`https://${normalized}`);
-  } catch (cause) {
-    throw new InvalidMacPasskeyRpDomainError({ reason: "parse-failed", inputLength, cause });
-  }
-
-  let reason: InvalidMacPasskeyRpDomainReason | undefined;
-  if (parsed.username.length > 0 || parsed.password.length > 0) {
-    reason = "credentials-not-allowed";
-  } else if (parsed.port.length > 0) {
-    reason = "port-not-allowed";
-  } else if (parsed.pathname !== "/") {
-    reason = "path-not-allowed";
-  } else if (parsed.search.length > 0) {
-    reason = "query-not-allowed";
-  } else if (parsed.hash.length > 0) {
-    reason = "fragment-not-allowed";
-  } else if (parsed.host !== normalized) {
-    reason = "hostname-mismatch";
-  }
-  if (reason) {
-    throw new InvalidMacPasskeyRpDomainError({ reason, inputLength });
-  }
-
-  return parsed.hostname;
-}
-
-export function resolveMacPasskeySigningConfiguration(
-  env: Readonly<Record<string, string | undefined>>,
-): MacPasskeySigningConfiguration {
-  const teamId = env.T3CODE_APPLE_TEAM_ID?.trim().toUpperCase() ?? "";
-  if (!APPLE_TEAM_ID_PATTERN.test(teamId)) {
-    throw new InvalidAppleTeamIdError({ teamId });
-  }
-
-  const provisioningProfilePath = env.T3CODE_MACOS_PROVISIONING_PROFILE?.trim() ?? "";
-  if (provisioningProfilePath.length === 0) {
-    throw new MissingMacPasskeyProvisioningProfileError();
-  }
-
-  const configuredRpDomains = env.T3CODE_CLERK_PASSKEY_RP_DOMAINS?.trim();
-  let rpDomains: readonly string[];
-  if (configuredRpDomains) {
-    rpDomains = configuredRpDomains.split(",").map(normalizePasskeyRpDomain);
-  } else {
-    const publishableKey = env.T3CODE_CLERK_PUBLISHABLE_KEY?.trim();
-    if (!publishableKey) {
-      throw new MissingMacPasskeyDomainConfigurationError();
-    }
-    let hostname: string;
-    try {
-      hostname = clerkFrontendApiHostnameFromPublishableKey(publishableKey);
-    } catch (cause) {
-      throw new InvalidMacPasskeyPublishableKeyError({ cause });
-    }
-    rpDomains = [normalizePasskeyRpDomain(hostname)];
-  }
-
-  const uniqueRpDomains = [...new Set(rpDomains)];
-  if (uniqueRpDomains.length === 0) {
-    throw new MissingMacPasskeyRpDomainError();
-  }
-
-  return {
-    appId: DESKTOP_APP_ID,
-    teamId,
-    rpDomains: uniqueRpDomains,
-    provisioningProfilePath,
-  };
-}
-
-function escapeXml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
-/**
- * Passkey entitlements for the in-app browser. Each is granted only when the
- * provisioning profile authorizes it: macOS refuses to launch an app that
- * claims a restricted entitlement its embedded profile does not carry.
- */
-export interface MacWebAuthnEntitlements {
-  readonly touchIdKeychainAccessGroup: string | undefined;
-  readonly browserPasskeys: boolean;
-}
-
-const BROWSER_PASSKEYS_ENTITLEMENT = "com.apple.developer.web-browser.public-key-credential";
-
-const ProvisioningProfilePlist = Schema.Struct({
-  Entitlements: Schema.Struct({
-    "keychain-access-groups": Schema.optional(Schema.Array(Schema.String)),
-    [BROWSER_PASSKEYS_ENTITLEMENT]: Schema.optional(Schema.Boolean),
-  }),
-});
-const isProvisioningProfilePlist = Schema.is(ProvisioningProfilePlist);
-
-const readProfileEntitlements = (provisioningProfile: string) => {
-  const start = provisioningProfile.indexOf("<?xml");
-  const end = provisioningProfile.indexOf("</plist>", start);
-  if (start === -1 || end === -1) return undefined;
-  try {
-    const profile: unknown = Plist.parse(provisioningProfile.slice(start, end + "</plist>".length));
-    return isProvisioningProfilePlist(profile) ? profile.Entitlements : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
-export function resolveMacWebAuthnEntitlements(
-  provisioningProfile: string,
-  configuration: Pick<MacPasskeySigningConfiguration, "appId" | "teamId">,
-): MacWebAuthnEntitlements {
-  const entitlements = readProfileEntitlements(provisioningProfile);
-  const keychainAccessGroup = `${configuration.teamId}.${configuration.appId}.webauthn`;
-  const keychainGroupAuthorized = (entitlements?.["keychain-access-groups"] ?? []).some((group) =>
-    group.endsWith("*")
-      ? keychainAccessGroup.startsWith(group.slice(0, -1))
-      : group === keychainAccessGroup,
-  );
-  return {
-    touchIdKeychainAccessGroup: keychainGroupAuthorized ? keychainAccessGroup : undefined,
-    browserPasskeys: entitlements?.[BROWSER_PASSKEYS_ENTITLEMENT] === true,
-  };
-}
-
-export function renderMacPasskeyEntitlements(
-  configuration: MacPasskeySigningConfiguration,
-  webAuthn: MacWebAuthnEntitlements,
-): string {
-  const associatedDomains = configuration.rpDomains
-    .map((domain) => `      <string>webcredentials:${escapeXml(domain)}</string>`)
-    .join("\n");
-  const keychainAccessGroups = webAuthn.touchIdKeychainAccessGroup
-    ? `
-    <key>keychain-access-groups</key>
-    <array>
-      <string>${escapeXml(webAuthn.touchIdKeychainAccessGroup)}</string>
-    </array>`
-    : "";
-  const browserPasskeys = webAuthn.browserPasskeys
-    ? `
-    <key>${BROWSER_PASSKEYS_ENTITLEMENT}</key>
-    <true/>`
-    : "";
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>com.apple.application-identifier</key>
-    <string>${escapeXml(`${configuration.teamId}.${configuration.appId}`)}</string>
-    <key>com.apple.developer.team-identifier</key>
-    <string>${escapeXml(configuration.teamId)}</string>
-    <key>com.apple.developer.associated-domains</key>
-    <array>
-${associatedDomains}
-    </array>${keychainAccessGroups}${browserPasskeys}
-    <key>com.apple.security.cs.allow-jit</key>
-    <true/>
-    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <true/>
-    <key>com.apple.security.cs.disable-library-validation</key>
-    <true/>
-  </dict>
-</plist>
-`;
-}
 
 export function resolveFffNativeDependencies(
   platform: typeof BuildPlatform.Type,
@@ -1696,6 +1383,7 @@ export const resolveMockUpdateServerPort = Effect.fn("resolveMockUpdateServerPor
 export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
   input: BuildCliInput,
 ) {
+  assertReviewedDesktopElectronVersion(desktopPackageJson.dependencies.electron);
   const path = yield* Path.Path;
   const repoRoot = yield* RepoRoot;
   const env = yield* BuildEnvConfig;
@@ -2682,12 +2370,6 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   signed: boolean,
   mockUpdates: boolean,
   mockUpdateServerPort: number | undefined,
-  macPasskeySigning:
-    | {
-        readonly entitlementsPath: string;
-        readonly provisioningProfilePath: string;
-      }
-    | undefined,
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
 ) {
@@ -2773,12 +2455,6 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         },
       ],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
-      ...(macPasskeySigning
-        ? {
-            entitlements: macPasskeySigning.entitlementsPath,
-            provisioningProfile: macPasskeySigning.provisioningProfilePath,
-          }
-        : {}),
     };
   }
 
@@ -3738,8 +3414,6 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     t3codeCommitHash: commitHash,
     t3codeAzureClientVersion: azureClientPackageJson.version,
     t3codeAzureClientSourceCommit: commitHash,
-    // Read by apps/desktop/src/preview/Passkeys.ts; must match the signed entitlements.
-
     private: true,
     packageManager: rootPackageJson.packageManager,
     description:
@@ -3755,7 +3429,6 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       options.signed,
       options.mockUpdates,
       options.mockUpdateServerPort,
-      undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
     ),

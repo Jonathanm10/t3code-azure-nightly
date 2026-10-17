@@ -70,6 +70,18 @@ export function validateCompleteAssets({ actual, expected }) {
   }
 }
 
+export function validateStandalonePackageProvenance({ metadata, sourceSha }) {
+  if (
+    typeof metadata?.name !== "string" ||
+    !/^@jonathanm10\/azure-devops-server-(client|mcp)$/.test(metadata.name) ||
+    metadata.source !== sourceSha ||
+    metadata.sourceTreeDirty !== false ||
+    typeof metadata.version !== "string" ||
+    !/^\d+\.\d+\.\d+$/.test(metadata.version)
+  )
+    throw new Error("Standalone package provenance does not match the clean candidate.");
+}
+
 export function shouldBuildNightly({ eventName, upstreamSha, baseForkSha, lastPublished }) {
   return (
     eventName !== "schedule" ||

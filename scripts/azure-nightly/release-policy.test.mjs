@@ -6,6 +6,7 @@ import {
   selectUpstreamNightly,
   validateCompleteAssets,
   shouldBuildNightly,
+  validateStandalonePackageProvenance,
 } from "./release-policy.mjs";
 
 NodeTest.test(
@@ -45,6 +46,27 @@ NodeTest.test(
     }
   },
 );
+NodeTest.test("standalone packages require clean provenance for the exact candidate", () => {
+  const sourceSha = "a".repeat(40);
+  const metadata = {
+    name: "@jonathanm10/azure-devops-server-client",
+    version: "0.1.0",
+    source: sourceSha,
+    sourceTreeDirty: false,
+  };
+  validateStandalonePackageProvenance({ metadata, sourceSha });
+  for (const invalid of [
+    { ...metadata, sourceTreeDirty: true },
+    { ...metadata, sourceTreeDirty: undefined },
+    { ...metadata, source: "b".repeat(40) },
+    { ...metadata, name: "other" },
+  ]) {
+    NodeAssert.throws(
+      () => validateStandalonePackageProvenance({ metadata: invalid, sourceSha }),
+      /clean candidate/,
+    );
+  }
+});
 NodeTest.test(
   "resolves a published upstream Nightly, ignoring drafts, stable and preview tags",
   () => {

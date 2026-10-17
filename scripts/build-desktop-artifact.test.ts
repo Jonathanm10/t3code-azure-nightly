@@ -8,12 +8,15 @@ import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as FileSystem from "effect/FileSystem";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Cause from "effect/Cause";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
 
 import {
   BundleNotSelfContainedError,
@@ -31,24 +34,16 @@ import {
   LINUX_BROWSER_SECRET_EXTRA_RESOURCES,
   LINUX_FILE_EXCLUSIONS,
   MAC_FILE_EXCLUSIONS,
-  InvalidMacPasskeyRpDomainError,
-  InvalidMacPasskeyPublishableKeyError,
   InvalidMockUpdateServerPortError,
   UnsupportedDesktopBuildArchitectureError,
-  isMacPasskeySigningConfigurationError,
   LinuxIconResizeError,
   LinuxDesktopBuildPrerequisitesMissingError,
   MacDesktopBuildPrerequisitesMissingError,
-  MacPasskeySigningConfigurationResolutionError,
-  MissingMacPasskeyProvisioningProfileError,
   packWindowsServerAsar,
   preflightLinuxDesktopBuild,
   preflightMacDesktopBuild,
   preflightWindowsDesktopBuild,
-  renderMacPasskeyEntitlements,
-  resolveMacWebAuthnEntitlements,
   resolveClerkPasskeyNativeArtifacts,
-  resolveMacPasskeySigningConfiguration,
   resolveDesktopRuntimeDependencies,
   resolveMergedStageDependencies,
   resolveFffNativeDependencies,
@@ -344,17 +339,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         false,
         false,
         undefined,
-        undefined,
       );
-      const release = yield* createBuildConfig(
-        "mac",
-        "dmg",
-        "0.0.33",
-        false,
-        false,
-        undefined,
-        undefined,
-      );
+      const release = yield* createBuildConfig("mac", "dmg", "0.0.33", false, false, undefined);
 
       const previewChannel = yield* createBuildConfig(
         "mac",
@@ -362,7 +348,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         "0.0.41-preview.20260912.1589",
         false,
         false,
-        undefined,
         undefined,
       );
 
@@ -612,41 +597,15 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it.effect("applies platform-specific packaging to the build config", () =>
     Effect.gen(function* () {
-      const mac = yield* createBuildConfig(
-        "mac",
-        "dmg",
-        "1.2.3",
-        false,
-        false,
-        undefined,
-        undefined,
-      );
-      const linux = yield* createBuildConfig(
-        "linux",
-        "AppImage",
-        "1.2.3",
-        false,
-        false,
-        undefined,
-        undefined,
-      );
-      const win = yield* createBuildConfig(
-        "win",
-        "nsis",
-        "1.2.3",
-        false,
-        false,
-        undefined,
-        undefined,
-        true,
-      );
+      const mac = yield* createBuildConfig("mac", "dmg", "1.2.3", false, false, undefined);
+      const linux = yield* createBuildConfig("linux", "AppImage", "1.2.3", false, false, undefined);
+      const win = yield* createBuildConfig("win", "nsis", "1.2.3", false, false, undefined, true);
       const winWithoutWslRuntime = yield* createBuildConfig(
         "win",
         "nsis",
         "1.2.3",
         false,
         false,
-        undefined,
         undefined,
         false,
       );
@@ -1909,204 +1868,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     ),
   );
 
-  it("derives macOS passkey signing configuration from the Clerk publishable key", () => {
-    const configuration = resolveMacPasskeySigningConfiguration({
-      T3CODE_APPLE_TEAM_ID: "abc1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
-      T3CODE_CLERK_PUBLISHABLE_KEY: `pk_test_${btoa("example.clerk.accounts.dev$")}`,
-    });
-
-    assert.deepStrictEqual(configuration, {
-      appId: "com.jonathanm10.t3code.azure",
-      teamId: "ABC1234567",
-      rpDomains: ["example.clerk.accounts.dev"],
-      provisioningProfilePath: "/tmp/t3code.provisionprofile",
-    });
-  });
-
-  it("normalizes explicit macOS passkey RP domains and renders required entitlements", () => {
-    const configuration = resolveMacPasskeySigningConfiguration({
-      T3CODE_APPLE_TEAM_ID: "ABC1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
-      T3CODE_CLERK_PASSKEY_RP_DOMAINS:
-        " Clerk.Example.com,example.clerk.accounts.dev,clerk.example.com ",
-    });
-    const entitlements = renderMacPasskeyEntitlements(configuration, {
-      touchIdKeychainAccessGroup: undefined,
-      browserPasskeys: false,
-    });
-
-    assert.deepStrictEqual(configuration.rpDomains, [
-      "clerk.example.com",
-      "example.clerk.accounts.dev",
-    ]);
-    assert.include(entitlements, "<string>ABC1234567.com.jonathanm10.t3code.azure</string>");
-    assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
-    assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
-    assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
-    assert.notInclude(entitlements, "keychain-access-groups");
-    assert.notInclude(entitlements, "com.apple.developer.web-browser.public-key-credential");
-  });
-
-  it("grants in-app browser passkey entitlements only when the provisioning profile does", () => {
-    const configuration = { appId: "com.jonathanm10.t3code.azure", teamId: "ABC1234567" };
-    const profile = (entitlements: string, outside = "") =>
-      `0\x82\x1f\x9a\x06\t*\x86H<?xml version="1.0"?><plist version="1.0"><dict>${outside}<key>Entitlements</key><dict>${entitlements}</dict></dict></plist>\x00\x01`;
-    const teamWildcardGroups = `<key>keychain-access-groups</key>
-      <array>
-        <string>ABC1234567.*</string>
-        <string>com.apple.token</string>
-      </array>`;
-
-    assert.deepStrictEqual(resolveMacWebAuthnEntitlements(profile(""), configuration), {
-      touchIdKeychainAccessGroup: undefined,
-      browserPasskeys: false,
-    });
-    assert.deepStrictEqual(
-      resolveMacWebAuthnEntitlements(
-        profile("<key>keychain-access-groups</key><array><string>OTHERTEAM1.*</string></array>"),
-        configuration,
-      ),
-      { touchIdKeychainAccessGroup: undefined, browserPasskeys: false },
-    );
-    assert.deepStrictEqual(
-      resolveMacWebAuthnEntitlements(
-        profile(
-          `<!-- ${teamWildcardGroups}
-          <key>com.apple.developer.web-browser.public-key-credential</key><true/> -->
-          <key>com.apple.developer.web-browser.public-key-credential</key><false/>`,
-          teamWildcardGroups,
-        ),
-        configuration,
-      ),
-      { touchIdKeychainAccessGroup: undefined, browserPasskeys: false },
-    );
-    assert.deepStrictEqual(
-      resolveMacWebAuthnEntitlements(
-        profile(
-          `${teamWildcardGroups}
-          <key>com.apple.developer.web-browser.public-key-credential</key>
-          <true/>`,
-        ),
-        configuration,
-      ),
-      {
-        touchIdKeychainAccessGroup: "ABC1234567.com.jonathanm10.t3code.azure.webauthn",
-        browserPasskeys: true,
-      },
-    );
-
-    const entitlements = renderMacPasskeyEntitlements(
-      { ...configuration, rpDomains: ["clerk.example.com"], provisioningProfilePath: "" },
-      resolveMacWebAuthnEntitlements(
-        profile(
-          `${teamWildcardGroups}<key>com.apple.developer.web-browser.public-key-credential</key><true/>`,
-        ),
-        configuration,
-      ),
-    );
-    assert.match(
-      entitlements,
-      /<key>keychain-access-groups<\/key>\s*<array>\s*<string>ABC1234567\.com\.jonathanm10\.t3code\.azure\.webauthn<\/string>\s*<\/array>/u,
-    );
-    assert.match(
-      entitlements,
-      /<key>com\.apple\.developer\.web-browser\.public-key-credential<\/key>\s*<true\/>/u,
-    );
-  });
-
-  it("rejects incomplete macOS passkey signing configuration", () => {
-    const captureError = (env: Readonly<Record<string, string | undefined>>) => {
-      try {
-        resolveMacPasskeySigningConfiguration(env);
-      } catch (error) {
-        return error;
-      }
-      return assert.fail("Expected passkey signing configuration to fail.");
-    };
-
-    const missingProfileError = captureError({
-      T3CODE_APPLE_TEAM_ID: "ABC1234567",
-      T3CODE_CLERK_PASSKEY_RP_DOMAINS: "example.clerk.accounts.dev",
-    });
-    assert.instanceOf(missingProfileError, MissingMacPasskeyProvisioningProfileError);
-    assert.equal(
-      missingProfileError.message,
-      "T3CODE_MACOS_PROVISIONING_PROFILE must point to an Associated Domains provisioning profile.",
-    );
-
-    const unsafeDomain =
-      "https://domain-user:domain-secret@example.clerk.accounts.dev/path?token=query-secret";
-    const invalidDomainError = captureError({
-      T3CODE_APPLE_TEAM_ID: "ABC1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
-      T3CODE_CLERK_PASSKEY_RP_DOMAINS: unsafeDomain,
-    });
-    assert.instanceOf(invalidDomainError, InvalidMacPasskeyRpDomainError);
-    assert.equal(invalidDomainError.reason, "scheme-not-allowed");
-    assert.equal(invalidDomainError.inputLength, unsafeDomain.length);
-    assert.equal(invalidDomainError.message, "Invalid passkey RP domain (scheme-not-allowed).");
-    assert.notProperty(invalidDomainError, "domain");
-    assert.notProperty(invalidDomainError, "cause");
-    const serializedInvalidDomainError = JSON.stringify(invalidDomainError);
-    assert.notInclude(serializedInvalidDomainError, unsafeDomain);
-    assert.notInclude(serializedInvalidDomainError, "domain-user");
-    assert.notInclude(serializedInvalidDomainError, "domain-secret");
-    assert.notInclude(serializedInvalidDomainError, "query-secret");
-    assert.throws(
-      () =>
-        resolveMacPasskeySigningConfiguration({
-          T3CODE_APPLE_TEAM_ID: "ABC1234567",
-          T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
-          T3CODE_CLERK_PASSKEY_RP_DOMAINS: "example.clerk.accounts.dev:8443",
-        }),
-      /Invalid passkey RP domain/u,
-    );
-    const invalidPublishableKeyError = captureError({
-      T3CODE_APPLE_TEAM_ID: "ABC1234567",
-      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/t3code.provisionprofile",
-      T3CODE_CLERK_PUBLISHABLE_KEY: "pk_test_%",
-    });
-    assert.instanceOf(invalidPublishableKeyError, InvalidMacPasskeyPublishableKeyError);
-    assert.ok(invalidPublishableKeyError.cause);
-    assert.equal(invalidPublishableKeyError.message, "T3CODE_CLERK_PUBLISHABLE_KEY is invalid.");
-    assert.notProperty(invalidPublishableKeyError, "publishableKey");
-    assert.notInclude(invalidPublishableKeyError.message, "pk_test_%");
-  });
-
-  it("preserves known passkey signing configuration errors at the build boundary", () => {
-    const decodingCause = new Error("publishable-key-decode-failed");
-    const knownError = new InvalidMacPasskeyPublishableKeyError({ cause: decodingCause });
-    const error = MacPasskeySigningConfigurationResolutionError.fromCause(knownError);
-
-    assert.strictEqual(error, knownError);
-    assert.instanceOf(error, InvalidMacPasskeyPublishableKeyError);
-    assert.strictEqual(error.cause, decodingCause);
-    assert.isTrue(isMacPasskeySigningConfigurationError(error));
-  });
-
-  it("wraps unknown passkey signing configuration defects without copying cause text", () => {
-    const secret = "pk_test_do-not-retain";
-    const cause = new Error(secret);
-    const error = MacPasskeySigningConfigurationResolutionError.fromCause(cause);
-
-    assert.instanceOf(error, MacPasskeySigningConfigurationResolutionError);
-    assert.strictEqual(error.cause, cause);
-    assert.equal(error.message, "Failed to resolve macOS passkey signing configuration.");
-    assert.notInclude(error.message, secret);
-  });
-
-  it.effect("adds passkey entitlements and both renderer protocols to signed macOS builds", () =>
+  it.effect("omits inherited passkey entitlements from signed fork builds", () =>
     Effect.gen(function* () {
-      const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
-        entitlementsPath: "/tmp/entitlements.mac.plist",
-        provisioningProfilePath: "/tmp/t3code.provisionprofile",
-      });
+      const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined);
 
       const mac = config.mac as Record<string, unknown>;
       assert.equal(config.appId, "com.jonathanm10.t3code.azure");
-      assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
-      assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
+      assert.notProperty(mac, "entitlements");
+      assert.notProperty(mac, "provisioningProfile");
       assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
       assert.deepStrictEqual(mac.protocols, [
         { name: "T3 Code", schemes: ["t3code-azure", "t3code-azure-dev"] },
@@ -2124,7 +1893,6 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         false,
         false,
         undefined,
-        undefined,
       );
 
       assert.equal(
@@ -2136,15 +1904,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it.effect("configures Windows executable metadata and native signing extensions", () =>
     Effect.gen(function* () {
-      const config = yield* createBuildConfig(
-        "win",
-        "nsis",
-        "1.2.3",
-        false,
-        false,
-        undefined,
-        undefined,
-      );
+      const config = yield* createBuildConfig("win", "nsis", "1.2.3", false, false, undefined);
 
       const win = config.win as Record<string, unknown>;
       assert.equal(win.icon, "icon.ico");
@@ -2340,6 +2100,35 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       cause,
     );
   });
+
+  it.effect("refuses an unreviewed Electron manifest before preparing a desktop build", () =>
+    Effect.gen(function* () {
+      const reviewedVersion = desktopPackageJson.dependencies.electron;
+      desktopPackageJson.dependencies.electron = "44.4.6";
+      try {
+        const exit = yield* Effect.exit(
+          resolveBuildOptions({
+            platform: Option.some("mac"),
+            target: Option.none(),
+            arch: Option.some("arm64"),
+            buildVersion: Option.none(),
+            outputDir: Option.none(),
+            skipBuild: Option.none(),
+            keepStage: Option.none(),
+            signed: Option.none(),
+            verbose: Option.none(),
+            mockUpdates: Option.none(),
+            mockUpdateServerPort: Option.none(),
+            wslRuntime: Option.none(),
+          }),
+        );
+        assert.isTrue(Exit.isFailure(exit));
+        if (Exit.isFailure(exit)) assert.include(Cause.pretty(exit.cause), "reviewed Electron");
+      } finally {
+        desktopPackageJson.dependencies.electron = reviewedVersion;
+      }
+    }),
+  );
 
   it.effect("resolves default platform and architecture from host references", () =>
     Effect.gen(function* () {

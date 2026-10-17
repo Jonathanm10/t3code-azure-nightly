@@ -77,8 +77,9 @@ jobs:
         run: vp install --frozen-lockfile
       - name: Focused extraction, profile and release checks
         run: |
-          node --experimental-test-module-mocks --test scripts/azure-nightly/release-policy.test.mjs scripts/azure-nightly/publish.test.mjs
+          node --experimental-test-module-mocks --test scripts/azure-nightly/release-policy.test.mjs scripts/azure-nightly/integrate.test.mjs scripts/azure-nightly/sign.test.mjs scripts/azure-nightly/publish.test.mjs
           python3 -m unittest discover -s scripts/azure-nightly -p test_extract_app.py
+          vp test run scripts/build-desktop-artifact.test.ts -t 'unreviewed Electron|omits inherited passkey'
           vp test run apps/desktop/src/app/DesktopForkProfile.test.ts apps/desktop/src/app/DesktopUserData.test.ts apps/desktop/src/app/DesktopClerk.test.ts scripts/azure-nightly/artifact-export.test.ts packages/shared/src/providerAuthReturnUrl.test.ts packages/shared/src/codexAuthHandoff.test.ts packages/shared/src/promptLinks.test.ts apps/server/src/auth/EnvironmentAuth.test.ts
           vp exec --filter @t3tools/desktop -- tsc-rs --noEmit
           vp run --filter @jonathanm10/azure-devops-server-client typecheck
@@ -87,6 +88,12 @@ jobs:
           vp run --filter @jonathanm10/azure-devops-server-mcp test
           vp run --filter @t3tools/source-control-azure-devops typecheck
           vp run --filter @t3tools/source-control-azure-devops test
+      - name: Package the standalone public core and MCP from the clean source
+        env:
+          SOURCE_SHA: ${{ needs.integrate.outputs.source_sha }}
+        run: |
+          test -z "$(git status --porcelain --untracked-files=all)"
+          node packages/azure-devops-server-mcp/scripts/pack.mjs --out "$GITHUB_WORKSPACE/unsigned" --source "$SOURCE_SHA"
       - name: Build an unsigned candidate as data for the trusted signer
         env:
           T3CODE_DESKTOP_UPDATE_REPOSITORY: Jonathanm10/t3code-azure-nightly
@@ -94,13 +101,10 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           FORK_VERSION: ${{ needs.integrate.outputs.version }}
         run: |
+          node scripts/update-release-package-versions.ts "$FORK_VERSION"
           node scripts/build-desktop-artifact.ts --platform mac --target zip --arch arm64 --build-version "$FORK_VERSION" --output-dir unsigned-build
           mkdir -p unsigned
           cp "unsigned-build/T3-Code-Azure-${FORK_VERSION}-arm64.zip" unsigned/unsigned-app.zip
-      - name: Package the standalone public core and MCP
-        env:
-          SOURCE_SHA: ${{ needs.integrate.outputs.source_sha }}
-        run: node packages/azure-devops-server-mcp/scripts/pack.mjs --out "$GITHUB_WORKSPACE/unsigned" --source "$SOURCE_SHA"
       - name: Verify the tarballs from a clean consumer outside the checkout
         run: |
           consumer_dir="$(mktemp -d "$RUNNER_TEMP/azure-consumer.XXXXXX")"

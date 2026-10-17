@@ -3,7 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 import * as NodeURL from "node:url";
-import { sha256 } from "./release-policy.mjs";
+import { sha256, validateStandalonePackageProvenance } from "./release-policy.mjs";
 
 // oxlint-disable-next-line t3code/no-global-process-runtime -- The trusted signing CLI validates its host before reading signing inputs.
 if (process.platform !== "darwin" || process.arch !== "arm64")
@@ -62,6 +62,22 @@ const archive = NodePath.join(input, "unsigned-app.zip");
 const app = NodePath.join(temporary, "app", "T3 Code (Azure Nightly).app");
 const signingEntitlements = NodePath.join(controller, "entitlements.plist");
 try {
+  const packages = NodeFS.readdirSync(input)
+    .filter((name) => name.endsWith(".tgz"))
+    .map((name) => {
+      const archivePath = NodePath.join(input, name);
+      const metadata = JSON.parse(
+        run("/usr/bin/tar", ["-xOf", archivePath, "package/provenance.json"]),
+      );
+      validateStandalonePackageProvenance({ metadata, sourceSha: provenance.sourceSha });
+      return { name, archivePath, metadata };
+    });
+  const packageProvenance = packages.map((entry) => entry.metadata);
+  if (
+    new Set(packageProvenance.map((entry) => entry.name)).size !== 2 ||
+    packageProvenance.length !== 2
+  )
+    throw new Error("Both standalone core and MCP packages are required.");
   const helper = NodePath.join(temporary, "import-identity");
   run("/usr/bin/swiftc", [
     NodePath.join(controller, "import-signing-identity.swift"),
@@ -207,26 +223,9 @@ try {
   if (dmgNotary.status !== "Accepted") throw new Error("Apple did not accept DMG notarization.");
   run("/usr/bin/xcrun", ["stapler", "staple", NodePath.join(output, dmgName)]);
   run("/usr/bin/xcrun", ["stapler", "validate", NodePath.join(output, dmgName)]);
-  const packageProvenance = [];
-  for (const name of NodeFS.readdirSync(input).filter((name) => name.endsWith(".tgz"))) {
-    const archivePath = NodePath.join(input, name);
-    const metadata = JSON.parse(
-      run("/usr/bin/tar", ["-xOf", archivePath, "package/provenance.json"]),
-    );
-    if (
-      !/^@jonathanm10\/azure-devops-server-(client|mcp)$/.test(metadata.name) ||
-      metadata.source !== provenance.sourceSha ||
-      !/^\d+\.\d+\.\d+$/.test(metadata.version)
-    )
-      throw new Error("Standalone package provenance does not match the candidate.");
-    packageProvenance.push(metadata);
+  for (const { name, archivePath } of packages) {
     NodeFS.copyFileSync(archivePath, NodePath.join(output, name));
   }
-  if (
-    new Set(packageProvenance.map((entry) => entry.name)).size !== 2 ||
-    packageProvenance.length !== 2
-  )
-    throw new Error("Both standalone core and MCP packages are required.");
   const zip = NodeFS.readFileSync(NodePath.join(output, zipName));
   NodeFS.writeFileSync(
     NodePath.join(output, "nightly-mac.yml"),
