@@ -41,8 +41,8 @@ function run(command, args, options = {}) {
     });
   } catch (error) {
     const diagnostic =
-      command === "/usr/bin/codesign"
-        ? ` ${JSON.stringify({ status: error?.status ?? null, stderr: String(error?.stderr ?? "").slice(0, 4096) })}`
+      command === "/usr/bin/codesign" || (command === "/usr/bin/xcrun" && args[0] === "stapler")
+        ? ` ${JSON.stringify({ status: error?.status ?? null, stderr: String(error?.stderr ?? "").slice(0, 4096), stdout: String(error?.stdout ?? "").slice(0, 4096) })}`
         : "";
     // oxlint-disable-next-line preserve-caught-error -- Subprocess causes can expose signing inputs and arguments.
     throw new Error(`Trusted release command failed: ${NodePath.basename(command)}${diagnostic}`);
@@ -207,6 +207,7 @@ try {
     ]),
   );
   if (notarization.status !== "Accepted") throw new Error("Apple did not accept notarization.");
+  console.info(JSON.stringify({ notarizationId: notarization.id, status: notarization.status }));
   run("/usr/bin/xcrun", ["stapler", "staple", app]);
   run("/usr/bin/xcrun", ["stapler", "validate", app]);
   run("/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=2", app]);
