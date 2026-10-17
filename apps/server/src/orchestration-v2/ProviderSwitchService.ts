@@ -69,23 +69,16 @@ export const layer: Layer.Layer<
           const current = projection.thread.modelSelection;
           const instanceChanged = current.instanceId !== targetModelSelection.instanceId;
           const modelChanged = current.model !== targetModelSelection.model;
-          const getMetadata = (instanceId: typeof current.instanceId) =>
-            adapters.getMetadata !== undefined
-              ? adapters.getMetadata(instanceId)
-              : adapters.get(instanceId).pipe(
-                  Effect.flatMap((adapter) =>
-                    adapter.getCapabilities().pipe(
-                      Effect.map((capabilities) => ({
-                        driver: adapter.driver,
-                        continuationKey: `${adapter.driver}:instance:${instanceId}`,
-                        enabled: true,
-                        capabilities,
-                      })),
-                    ),
-                  ),
-                );
-          const currentInstance = yield* Effect.option(getMetadata(current.instanceId));
-          const targetInstance = yield* Effect.option(getMetadata(targetModelSelection.instanceId));
+          const currentInstance = yield* Effect.option(
+            ProviderAdapterRegistry.getContinuationMetadata(current.instanceId).pipe(
+              Effect.provideService(ProviderAdapterRegistry.ProviderAdapterRegistryV2, adapters),
+            ),
+          );
+          const targetInstance = yield* Effect.option(
+            ProviderAdapterRegistry.getContinuationMetadata(targetModelSelection.instanceId).pipe(
+              Effect.provideService(ProviderAdapterRegistry.ProviderAdapterRegistryV2, adapters),
+            ),
+          );
           const targetAdapter = yield* Effect.option(adapters.get(targetModelSelection.instanceId));
           const currentSessions = projection.providerSessions
             .filter((session) => session.providerInstanceId === current.instanceId)

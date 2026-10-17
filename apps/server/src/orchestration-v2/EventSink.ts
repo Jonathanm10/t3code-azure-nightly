@@ -83,6 +83,7 @@ export interface EventSinkV2Shape {
     readonly threadId: ThreadId;
     readonly runId: RunId;
     readonly activeAttemptId: RunAttemptId;
+    readonly expectedRootProviderThreads?: ReadonlyArray<OrchestrationV2ProviderThread>;
     readonly expectedStatus: OrchestrationV2Run["status"];
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects?: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
@@ -425,6 +426,34 @@ const layerBase: Layer.Layer<
                 committed: false as const,
                 storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
               };
+            }
+
+            if (input.expectedRootProviderThreads !== undefined) {
+              const rows = yield* sql<{
+                readonly provider_thread_id: string;
+                readonly payload_json: string;
+              }>`
+                SELECT provider_thread_id, payload_json FROM orchestration_v2_projection_provider_threads
+                WHERE thread_id = ${input.threadId} AND json_extract(payload_json, '$.ownerNodeId') IS NULL
+                  AND json_extract(payload_json, '$.appThreadId') = ${input.threadId}
+              `;
+              const expected = yield* Effect.forEach(input.expectedRootProviderThreads, (row) =>
+                ProjectionStore.encodeProviderThreadPayload(row).pipe(
+                  Effect.map((json) => ({ id: row.id, json })),
+                ),
+              );
+              if (
+                rows.length !== expected.length ||
+                expected.some(
+                  (row) =>
+                    rows.find((current) => current.provider_thread_id === row.id)?.payload_json !==
+                    row.json,
+                )
+              )
+                return {
+                  committed: false as const,
+                  storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+                };
             }
 
             const normalized = yield* normalizeEvents(

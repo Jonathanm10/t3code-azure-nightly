@@ -1817,7 +1817,7 @@ describe("orchestration v2 provider switching", () => {
         };
         const alternateCapabilities = {
           ...CodexProviderCapabilitiesV2,
-          canConsumeHandoffSummaries: false,
+          context: { ...CodexProviderCapabilitiesV2.context, canConsumeHandoffSummaries: false },
         };
         const adapters = [
           makeTestAdapter({
@@ -1923,8 +1923,38 @@ describe("orchestration v2 provider switching", () => {
           )?.nativeThreadRef;
           assert.isNotNull(sourceNativeRef);
           const now = yield* DateTime.now;
+          const firstRun = queued.runs[0]!;
+          const firstAttempt = queued.attempts.find(
+            (attempt) => attempt.id === firstRun.activeAttemptId,
+          )!;
+          assert.equal(firstAttempt.nativeThreadId, sourceNativeRef?.nativeId);
+          assert.deepEqual(
+            (yield* Ref.get(capturedTurns)).map((turn) => turn.text),
+            ["First account turn"],
+          );
           yield* eventSink.write({
             events: [
+              {
+                id: EventId.make("event:queued-account-switch:first-accepted"),
+                type: "provider-turn.updated",
+                threadId: queuedThreadId,
+                runId: firstRun.id,
+                providerInstanceId: CODEX_MODEL_SELECTION.instanceId,
+                occurredAt: now,
+                payload: {
+                  id: ProviderTurnId.make(
+                    `provider-turn:${CODEX_DRIVER}:${queuedThreadId}:${firstRun.ordinal}`,
+                  ),
+                  providerThreadId: firstAttempt.providerThreadId,
+                  nodeId: firstAttempt.rootNodeId,
+                  runAttemptId: firstAttempt.id,
+                  nativeTurnRef: null,
+                  ordinal: firstRun.ordinal,
+                  status: "completed",
+                  startedAt: now,
+                  completedAt: now,
+                },
+              },
               {
                 id: EventId.make("event:queued-account-switch:first-complete"),
                 type: "run.updated",

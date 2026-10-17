@@ -254,6 +254,25 @@ it.effect(
       yield* sql`INSERT INTO orchestration_v2_projection_context_handoffs
         (context_handoff_id, thread_id, target_run_id, to_provider_thread_id, strategy, status, updated_at, payload_json)
         VALUES ('obsolete-handoff', ${threadId}, 'old-run', 'old-provider-thread', 'full_thread_summary', 'ready', ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
+      const rejected = yield* orchestrator
+        .dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("manual-dispatch-with-unreadable-context"),
+          threadId,
+          messageId: MessageId.make("rejected-input"),
+          text: "Continue with the retained context",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        })
+        .pipe(Effect.exit);
+      assert.equal(rejected._tag, "Failure");
+      assert.lengthOf((yield* projections.getThreadRecords(threadId, ["runs"])).runs, 0);
+      assert.lengthOf(
+        yield* sql`SELECT effect_id FROM orchestration_v2_effect_outbox WHERE command_id = 'manual-dispatch-with-unreadable-context'`,
+        0,
+      );
       yield* orchestrator.dispatch({
         type: "message.dispatch",
         commandId: CommandId.make("dispatch-with-old-history"),
@@ -262,8 +281,8 @@ it.effect(
         text: "Continue",
         attachments: [],
         dispatchMode: { type: "defer_start" },
-        createdBy: "user",
-        creationSource: "web",
+        createdBy: "agent",
+        creationSource: "mcp",
       });
       const fresh = yield* projections.getThreadRecords(threadId, ["turnItems"], {
         turnItemTypes: ["user_message"],
