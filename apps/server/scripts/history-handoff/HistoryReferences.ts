@@ -157,6 +157,7 @@ type Context = "image" | "anchor" | "viewed-image" | "screenshot";
 type Span = { readonly start: number; readonly end: number; readonly authored: string };
 type Target =
   | { readonly kind: "span"; readonly span: Span }
+  | { readonly kind: "citation-path"; readonly span: Span }
   | { readonly kind: "field" }
   | { readonly kind: "unsupported" };
 type Meaning = {
@@ -208,29 +209,55 @@ function positionKey(value: unknown): string | undefined {
 }
 
 function markdownPlan(markdown: string) {
-  if (!markdown.includes("[") && !markdown.includes("<"))
+  if (
+    !markdown.includes("[") &&
+    !markdown.includes("<") &&
+    !markdown.includes(":codex-file-citation")
+  )
     return {
       references: new Array<Reference>(),
       structure: (_relocate: (path: string) => string | undefined) => markdown,
     };
   const destinations = new WeakMap<object, Span>();
+  const citationPaths = new WeakMap<object, Array<Span | undefined>>();
+  function tokenSpan(token: unknown): Span {
+    const position = Schema.decodeUnknownSync(positionSchema)(token);
+    return {
+      start: position.start.offset,
+      end: position.end.offset,
+      authored: markdown.slice(position.start.offset, position.end.offset),
+    };
+  }
   function captureDestinations(this: { data(): { fromMarkdownExtensions?: unknown[] } }) {
     const data = this.data();
     function capture(this: { stack: object[]; buffer(): void }, token: unknown) {
       const node = this.stack.at(-1);
-      const position = Schema.decodeUnknownSync(positionSchema)(token);
-      if (node)
-        destinations.set(node, {
-          start: position.start.offset,
-          end: position.end.offset,
-          authored: markdown.slice(position.start.offset, position.end.offset),
-        });
+      if (node) destinations.set(node, tokenSpan(token));
       this.buffer();
     }
     (data.fromMarkdownExtensions ??= []).push({
       enter: {
         resourceDestinationString: capture,
         definitionDestinationString: capture,
+        directiveTextAttributeName(
+          this: { stack: object[]; sliceSerialize(token: unknown): string },
+          token: unknown,
+        ) {
+          const node = this.stack.at(-2);
+          if (!node || this.sliceSerialize(token) !== "path") return;
+          const paths = citationPaths.get(node) ?? [];
+          paths.push(undefined);
+          citationPaths.set(node, paths);
+        },
+        directiveTextAttributeValue(
+          this: { stack: object[]; data: { directiveAttributes?: Array<[string, string]> } },
+          token: unknown,
+        ) {
+          const node = this.stack.at(-2);
+          const paths = node ? citationPaths.get(node) : undefined;
+          if (paths && this.data.directiveAttributes?.at(-1)?.[0] === "path")
+            paths[paths.length - 1] = tokenSpan(token);
+        },
       },
     });
   }
@@ -253,14 +280,26 @@ function markdownPlan(markdown: string) {
       definitions.set(node.identifier, node);
   });
   walk(ast, (node) => {
-    if (!["link", "image", "linkReference", "imageReference"].includes(String(node.type))) return;
+    const citation = node.type === "textDirective" && node.name === "codex-file-citation";
+    if (
+      !citation &&
+      !["link", "image", "linkReference", "imageReference"].includes(String(node.type))
+    )
+      return;
     const key = positionKey(node.position);
     if (key === undefined) return;
     const owner = typeof node.identifier === "string" ? definitions.get(node.identifier) : node;
-    const span = owner ? destinations.get(owner) : undefined;
+    const paths = citationPaths.get(node);
+    const span = citation
+      ? paths?.length === 1
+        ? paths[0]
+        : undefined
+      : owner
+        ? destinations.get(owner)
+        : undefined;
     sources.set(key, {
       context: node.type === "image" || node.type === "imageReference" ? "image" : "anchor",
-      target: span ? { kind: "span", span } : { kind: "unsupported" },
+      target: span ? { kind: citation ? "citation-path" : "span", span } : { kind: "unsupported" },
     });
   });
   const tree = callMethod(current, "runSync", [ast, { value: markdown }]);
@@ -325,7 +364,7 @@ function markdownPlan(markdown: string) {
 
 export function markdownAssetReferences(markdown: string) {
   return markdownPlan(markdown).references.map((ref) =>
-    ref.target.kind === "span"
+    "span" in ref.target
       ? {
           kind: "path" as const,
           value: ref.value,
@@ -338,6 +377,8 @@ export function markdownAssetReferences(markdown: string) {
 
 function replacement(ref: Reference, destination: string) {
   if (ref.target.kind === "unsupported") refused(ref.meaning.path);
+  if (ref.target.kind === "citation-path")
+    return destination.replace(/[&"'<>}=`\s]/g, (character) => `&#${character.charCodeAt(0)};`);
   if (ref.context === "screenshot" && !/^file:/i.test(ref.value)) return destination;
   const authored = ref.target.kind === "span" ? ref.target.span.authored : ref.value;
   const normalized = normalizeMarkdownLinkDestination(ref.value);
@@ -425,7 +466,7 @@ export function rewriteMarkdownAssets(
       refused(ref.meaning.path, "conflicting-reference-destination");
     moved.set(ref.meaning.path, destination);
     const to = replacement(ref, destination);
-    if (ref.target.kind !== "span") refused(ref.meaning.path);
+    if (!("span" in ref.target)) refused(ref.meaning.path);
     edits.push({
       span: ref.target.span,
       replacement: to,

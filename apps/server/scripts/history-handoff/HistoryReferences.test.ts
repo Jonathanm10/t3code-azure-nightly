@@ -59,7 +59,7 @@ function render(markdown: string) {
   processor = call(processor, "use", CHAT_MARKDOWN_REMARK_PLUGINS);
   processor = call(processor, "use", moduleDefault("remark-rehype"), { allowDangerousHtml: true });
   processor = call(processor, "use", CHAT_MARKDOWN_REHYPE_PLUGINS);
-  return call(processor, "runSync", call(processor, "parse", markdown));
+  return call(processor, "runSync", call(processor, "parse", markdown), { value: markdown });
 }
 function renderedConsumers(markdown: string) {
   const references: Array<{ tag: string; path: string | null; children: string[] }> = [];
@@ -103,32 +103,39 @@ function renderedConsumers(markdown: string) {
   visit(render(markdown));
   return references;
 }
-it.effect.each(["nested-markdown", "encoded-root"])(
+it.effect.each(["nested-markdown", "encoded-root", "citation-pdf"])(
   "copies %s with exact display, consumer identity, independent bytes and two rebuilds",
   (scenario) =>
     Effect.gen(function* () {
       const f = yield* fixture();
       const source = NodePath.join(
         f.sourceState,
-        "browser-artifacts",
-        "only-in-reference-probe.png",
+        scenario === "citation-pdf" ? "attachments" : "browser-artifacts",
+        scenario === "citation-pdf" ? "document.pdf" : "only-in-reference-probe.png",
       );
       const destination = NodePath.join(
         f.targetHome,
         "userdata",
-        "browser-artifacts",
-        "only-in-reference-probe.png",
+        scenario === "citation-pdf" ? "attachments" : "browser-artifacts",
+        scenario === "citation-pdf" ? "document.pdf" : "only-in-reference-probe.png",
       );
-      const uniqueBytes = Buffer.concat([png, Buffer.from(scenario)]);
+      const uniqueBytes =
+        scenario === "citation-pdf"
+          ? Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n")
+          : Buffer.concat([png, Buffer.from(scenario)]);
       yield* Effect.promise(() => NodeFSP.writeFile(source, uniqueBytes));
       const original =
         scenario === "nested-markdown"
           ? `[![thumb](${source})](${source})`
-          : `![img](${source.replaceAll("/", "%2F")})`;
+          : scenario === "citation-pdf"
+            ? `:codex-file-citation{path="${source}" purpose="source" line_range_start="7"}`
+            : `![img](${source.replaceAll("/", "%2F")})`;
       const expected =
         scenario === "nested-markdown"
           ? `[![thumb](${destination})](${destination})`
-          : `![img](${destination})`;
+          : scenario === "citation-pdf"
+            ? `:codex-file-citation{path="${destination}" purpose="source" line_range_start="7"}`
+            : `![img](${destination})`;
       const id = MessageId.make("reference-regression");
       yield* Effect.gen(function* () {
         yield* (yield* EventSink.EventSinkV2).commitCommand({
@@ -186,7 +193,9 @@ it.effect.each(["nested-markdown", "encoded-root"])(
                   { tag: "a", path: destination, children: ["img"] },
                   { tag: "img", path: destination, children: [] },
                 ]
-              : [{ tag: "img", path: destination, children: [] }],
+              : scenario === "citation-pdf"
+                ? [{ tag: "a", path: destination, children: ["text"] }]
+                : [{ tag: "img", path: destination, children: [] }],
           );
         }
       }).pipe(
@@ -214,6 +223,90 @@ it.effect.each(["nested-markdown", "encoded-root"])(
 const source = "/tmp/source/browser-artifacts/shot.png";
 const destination = "/tmp/longer-target/userdata/browser-artifacts/shot.png";
 const relocate = (path: string) => (path === source ? destination : undefined);
+
+it.each(['"', "'", ""])("relocates the authored citation path with %s quotes", (quote) => {
+  const path = "/source/attachments/document.pdf";
+  const target = "/target/attachments/document.pdf";
+  const text = `:codex-file-citation{path=${quote}${path}${quote} purpose="source"}`;
+  expect(historyReferences(text).paths).toEqual([path]);
+  expect(rewriteMarkdownAssets(text, (p) => (p === path ? target : undefined))).toEqual({
+    text: text.replace(path, target),
+    changes: [{ from: path, to: target, offset: text.indexOf(path) }],
+  });
+  expect(renderedConsumers(text)).toEqual([{ tag: "a", path, children: ["text"] }]);
+  expect(renderedConsumers(text.replace(path, target))).toEqual([
+    { tag: "a", path: target, children: ["text"] },
+  ]);
+});
+
+it("relocates only the citation path and preserves its line, label and surrounding source", () => {
+  const path = "/source/attachments/document.pdf";
+  const target = "/target/attachments/document.pdf";
+  const authored = "&#47;source/attachments/document.pdf";
+  const text = `😀 [context]\r\n:codex-file-citation[Ignored label]{purpose="${path}" path='${authored}' line_range_start="7" line_range_end="9"} after`;
+  const result = rewriteMarkdownAssets(text, (p) => (p === path ? target : undefined));
+  expect(result).toEqual({
+    text: text.replace(authored, target),
+    changes: [{ from: authored, to: target, offset: text.indexOf(authored) }],
+  });
+  expect(renderedConsumers(result.text)).toEqual([{ tag: "a", path: target, children: ["text"] }]);
+  expect(JSON.stringify(render(result.text))).toContain(`${target}#L7`);
+  expect(() => rewriteMarkdownAssets(text, () => "/target/attachments/renamed.pdf")).toThrow(
+    "changed-rendered-history",
+  );
+});
+
+it.each(['"', "'", ""])("encodes literal citation paths safely inside %s attributes", (quote) => {
+  const path = "/source/attachments/literal%2F#?.pdf";
+  const target = "/target/space &\"'<>}=`😀/literal%2F#?.pdf";
+  const text = `:codex-file-citation{path=${quote}${path}${quote} line_range_start=7}`;
+  const encoded = "/target/space&#32;&#38;&#34;&#39;&#60;&#62;&#125;&#61;&#96;😀/literal%2F#?.pdf";
+  const result = rewriteMarkdownAssets(text, (p) => (p === path ? target : undefined));
+  expect(result.text).toBe(text.replace(path, encoded));
+  expect(historyReferences(result.text).paths).toEqual([target]);
+  expect(renderedConsumers(result.text)).toEqual([{ tag: "a", path: target, children: ["text"] }]);
+});
+
+it.each(["path=/other/document.pdf", "path=/source/attachments/document.pdf", "path"])(
+  "refuses duplicate citation path ownership after %s",
+  (first) => {
+    const text = `:codex-file-citation{${first} path=/source/attachments/document.pdf}`;
+    expect(historyReferences(text).paths).toEqual(["/source/attachments/document.pdf"]);
+    expect(() => rewriteMarkdownAssets(text, () => "/target/attachments/document.pdf")).toThrow(
+      "unsupported-renderable-reference",
+    );
+  },
+);
+
+it("keeps excluded citation syntax and unrelated directive attributes exact", () => {
+  const citation = ':codex-file-citation{path="/source/attachments/document.pdf"}';
+  for (const text of [
+    `\\${citation}`,
+    `\`${citation}\``,
+    `\`\`\`md\n${citation}\n\`\`\``,
+    `[${citation}](https://example.test)`,
+    ':codex-file-citation{purpose="source"}',
+    ':codex-file-citation{path="workspace/document.pdf"}',
+    ':codex-file-citation{path="https://example.test/document.pdf"}',
+    ':codex-followup[Open]{path="/source/attachments/document.pdf" prompt="Open"}',
+  ]) {
+    expect(historyReferences(text).paths).toEqual([]);
+    expect(rewriteMarkdownAssets(text, () => "/target/attachments/document.pdf")).toEqual({
+      text,
+      changes: [],
+    });
+  }
+});
+
+it("preserves recovered citations that the renderer leaves without a link", () => {
+  const text = '-      :codex-file-citation{path="/source/attachments/document.pdf"}';
+  expect(renderedConsumers(text)).toEqual([]);
+  expect(historyReferences(text).paths).toEqual([]);
+  expect(rewriteMarkdownAssets(text, () => "/target/attachments/document.pdf")).toEqual({
+    text,
+    changes: [],
+  });
+});
 
 it.each([
   { name: "an unmatched bracket", prefix: "[", body: "a ".repeat(2048) },
