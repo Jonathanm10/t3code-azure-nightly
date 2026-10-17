@@ -101,7 +101,6 @@ const SERVER_PERMISSIONS: PullRequestViewerPermissions = {
   requestReviewers: false,
 };
 
-/** The CLI tags that mean the tool itself is unusable, rather than one request failing. */
 export function azureDevOpsProviderFailure(
   error: AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCliError,
 ): PullRequestProviderFailure {
@@ -435,8 +434,6 @@ export const makeWithReader = Effect.fnUntraced(function* (
           ),
         ),
 
-    // No request at all: Azure has nothing to say about the viewer that a pull request read can
-    // reach, so the answer is the same constant the detail carries.
     getViewerPermissions: () => Effect.succeed(permissions),
 
     // `input.commit` is deliberately dropped: Azure states no commit list on a pull request, so
@@ -635,8 +632,6 @@ export const makeWithReader = Effect.fnUntraced(function* (
             .setPullRequestReviewers({
               cwd: input.cwd,
               number: input.number,
-              // Azure names an identity by an email address or a guid, and has no team to ask, so a
-              // candidate's id is the whole of what it takes.
               reviewers: input.reviewers.map((reviewer) => reviewer.id),
               requested: input.requested,
             })

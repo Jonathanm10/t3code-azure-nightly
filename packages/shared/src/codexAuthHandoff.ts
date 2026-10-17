@@ -83,7 +83,7 @@ export function codexCallbackUrl(value: string, redirectUri: string, state: stri
 }
 
 export function codexAuthHandoffUrl(input: CodexAuthHandoff, development = false) {
-  const url = new URL(`${development ? "t3code-dev" : "t3code"}://auth/codex`);
+  const url = new URL(`${development ? "t3code-azure-dev" : "t3code-azure"}://auth/codex`);
   url.searchParams.set("request", encodeHandoff(input));
   return url.toString();
 }
@@ -93,7 +93,7 @@ export function readCodexAuthHandoff(value: string, development: boolean) {
     const url = new URL(value);
     if (
       value.length > 32_768 ||
-      url.protocol !== (development ? "t3code-dev:" : "t3code:") ||
+      url.protocol !== (development ? "t3code-azure-dev:" : "t3code-azure:") ||
       url.host !== "auth" ||
       url.pathname !== "/codex" ||
       url.username ||
@@ -104,7 +104,15 @@ export function readCodexAuthHandoff(value: string, development: boolean) {
       return undefined;
     const input = decodeHandoff(url.searchParams.get("request"));
     codexAuthorizationRequest(input.authorizationUrl);
-    if (!providerAuthReturnUrl(input.returnUrl)) return undefined;
+    const destination = providerAuthReturnUrl(input.returnUrl);
+    if (!destination) return undefined;
+    const returnProtocol = new URL(destination).protocol;
+    if (
+      returnProtocol !== "http:" &&
+      returnProtocol !== "https:" &&
+      returnProtocol !== url.protocol
+    )
+      return undefined;
     return input;
   } catch {
     return undefined;

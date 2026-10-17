@@ -114,13 +114,19 @@ describe("link round trips", () => {
     );
     expect(promptLinkAppPath("https://app.t3.codes/settings/general")).toBeNull();
     expect(promptLinkAppPath("https://evil.test/new?prompt=hi")).toBeNull();
+    expect(promptLinkAppPath("t3code-azure://new?prompt=hi")).toBe("/new?prompt=hi");
+    expect(promptLinkAppPath("t3code-azure-dev://threads/env-1/thread-1")).toBe("/env-1/thread-1");
+    expect(promptLinkAppPath("t3code-other://new?prompt=hi")).toBeNull();
+    expect(promptLinkAppPath("t3code-azure://user@new?prompt=hi")).toBeNull();
+    expect(promptLinkAppPath("t3code-azure://new:12?prompt=hi")).toBeNull();
     expect(promptLinkAppPath("t3code://app/index.html")).toBeNull();
   });
 
-  it("hands an in-app path to the installed app", () => {
-    expect(promptLinkDeepLink("/new?prompt=hi")).toBe("t3code://new?prompt=hi");
+  it("hands an in-app path to the installed fork", () => {
+    expect(() => promptLinkDeepLink("/new?prompt=hi", "arbitrary")).toThrow();
+    expect(promptLinkDeepLink("/new?prompt=hi")).toBe("t3code-azure://new?prompt=hi");
     expect(promptLinkDeepLink("/env-1/thread-1?prompt=hi")).toBe(
-      "t3code://threads/env-1/thread-1?prompt=hi",
+      "t3code-azure://threads/env-1/thread-1?prompt=hi",
     );
   });
 });

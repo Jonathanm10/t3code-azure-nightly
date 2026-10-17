@@ -38,7 +38,7 @@ describe("electron development launcher", () => {
   it("keeps the launcher script free of volatile environment values", () => {
     const script = makeDevelopmentLauncherScript({
       electronBinaryPath: "/repo/node_modules/electron/Electron",
-      mainEntryPath: "/repo/apps/desktop/dist-electron/main.cjs",
+      mainEntryPath: "/repo/apps/desktop/dist-electron/boot.cjs",
       desktopRoot: "/repo/apps/desktop",
       environmentFilePath: "/repo/apps/desktop/.electron-runtime/dev-environment.sh",
     });
@@ -50,7 +50,7 @@ describe("electron development launcher", () => {
     assert.notInclude(script, "VITE_DEV_SERVER_URL");
     assert.include(
       script,
-      "exec '/repo/node_modules/electron/Electron' --t3code-dev-root='/repo/apps/desktop' '/repo/apps/desktop/dist-electron/main.cjs' \"$@\"",
+      "exec '/repo/node_modules/electron/Electron' --t3code-dev-root='/repo/apps/desktop' '/repo/apps/desktop/dist-electron/boot.cjs' \"$@\"",
     );
   });
 
@@ -92,7 +92,7 @@ describe("electron development launcher", () => {
 
     const script = makeDevelopmentLauncherScript({
       electronBinaryPath: paths.runtimeElectronBinaryPath,
-      mainEntryPath: "/repo/apps/desktop/dist-electron/main.cjs",
+      mainEntryPath: "/repo/apps/desktop/dist-electron/boot.cjs",
       desktopRoot: "/repo/apps/desktop",
       environmentFilePath: "/repo/apps/desktop/.electron-runtime/dev-environment.sh",
     });

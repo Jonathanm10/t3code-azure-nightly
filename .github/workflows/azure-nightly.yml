@@ -1,0 +1,167 @@
+name: Azure fork Nightly
+
+on:
+  schedule:
+    - cron: "23 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: azure-nightly-publisher
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    if: github.ref == 'refs/heads/release-control' && github.repository == 'Jonathanm10/t3code-azure-nightly'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      should_build: ${{ steps.integrate.outputs.should_build }}
+      version: ${{ steps.integrate.outputs.version }}
+      source_sha: ${{ steps.integrate.outputs.source_sha }}
+      upstream_sha: ${{ steps.integrate.outputs.upstream_sha }}
+      upstream_tag: ${{ steps.integrate.outputs.upstream_tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: controller
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: azure-nightly
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+      - name: Merge a concrete upstream Nightly without candidate execution
+        id: integrate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node controller/scripts/azure-nightly/integrate.mjs candidate
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.integrate.outputs.should_build == 'true'
+        with:
+          name: azure-nightly-provenance
+          path: candidate/azure-nightly-provenance.json
+          if-no-files-found: error
+
+  candidate:
+    if: needs.integrate.outputs.should_build == 'true'
+    needs: integrate
+    runs-on: macos-15
+    permissions:
+      contents: read
+    env:
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.T3CODE_CLERK_PUBLISHABLE_KEY }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.T3CODE_CLERK_JWT_TEMPLATE }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID }}
+      T3CODE_RELAY_URL: ${{ vars.T3CODE_RELAY_URL }}
+    steps:
+      - name: Require explicit public desktop configuration
+        run: |
+          node --input-type=module -e 'for (const key of ["T3CODE_CLERK_PUBLISHABLE_KEY", "T3CODE_CLERK_JWT_TEMPLATE", "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID", "T3CODE_RELAY_URL"]) if (!process.env[key]?.trim()) throw new Error(`Required public build config is absent: ${key}`); if (!/^pk_(live|test)_/.test(process.env.T3CODE_CLERK_PUBLISHABLE_KEY)) throw new Error("Invalid public Clerk key"); if (new URL(process.env.T3CODE_RELAY_URL).protocol !== "https:") throw new Error("Relay must use HTTPS");'
+      - name: Require the standard Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.integrate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - name: Install candidate dependencies without signing credentials
+        run: vp install --frozen-lockfile
+      - name: Focused extraction, profile and release checks
+        run: |
+          node --experimental-test-module-mocks --test scripts/azure-nightly/release-policy.test.mjs scripts/azure-nightly/publish.test.mjs
+          python3 -m unittest discover -s scripts/azure-nightly -p test_extract_app.py
+          vp test run apps/desktop/src/app/DesktopForkProfile.test.ts apps/desktop/src/app/DesktopUserData.test.ts apps/desktop/src/app/DesktopClerk.test.ts scripts/azure-nightly/artifact-export.test.ts packages/shared/src/providerAuthReturnUrl.test.ts packages/shared/src/codexAuthHandoff.test.ts packages/shared/src/promptLinks.test.ts apps/server/src/auth/EnvironmentAuth.test.ts
+          vp exec --filter @t3tools/desktop -- tsc-rs --noEmit
+          vp run --filter @jonathanm10/azure-devops-server-client typecheck
+          vp run --filter @jonathanm10/azure-devops-server-client test
+          vp run --filter @jonathanm10/azure-devops-server-mcp typecheck
+          vp run --filter @jonathanm10/azure-devops-server-mcp test
+          vp run --filter @t3tools/source-control-azure-devops typecheck
+          vp run --filter @t3tools/source-control-azure-devops test
+      - name: Build an unsigned candidate as data for the trusted signer
+        env:
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: Jonathanm10/t3code-azure-nightly
+          T3CODE_DESKTOP_SIGNED: "false"
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          FORK_VERSION: ${{ needs.integrate.outputs.version }}
+        run: |
+          node scripts/build-desktop-artifact.ts --platform mac --target zip --arch arm64 --build-version "$FORK_VERSION" --output-dir unsigned-build
+          mkdir -p unsigned
+          cp "unsigned-build/T3-Code-Azure-${FORK_VERSION}-arm64.zip" unsigned/unsigned-app.zip
+      - name: Package the standalone public core and MCP
+        env:
+          SOURCE_SHA: ${{ needs.integrate.outputs.source_sha }}
+        run: node packages/azure-devops-server-mcp/scripts/pack.mjs --out "$GITHUB_WORKSPACE/unsigned" --source "$SOURCE_SHA"
+      - name: Verify the tarballs from a clean consumer outside the checkout
+        run: |
+          consumer_dir="$(mktemp -d "$RUNNER_TEMP/azure-consumer.XXXXXX")"
+          npm install --prefix "$consumer_dir" --ignore-scripts --no-audit --no-fund "$GITHUB_WORKSPACE"/unsigned/*.tgz
+          cd "$consumer_dir"
+          node node_modules/@jonathanm10/azure-devops-server-mcp/dist/main.js --help
+          node --input-type=module -e 'await import(process.argv[1]);' "$consumer_dir/node_modules/@jonathanm10/azure-devops-server-client/dist/index.js"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: azure-nightly-provenance
+          path: unsigned
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: azure-nightly-unsigned
+          path: unsigned/*
+          if-no-files-found: error
+
+  sign-and-publish:
+    if: needs.integrate.outputs.should_build == 'true'
+    needs: [integrate, candidate]
+    runs-on: macos-15
+    environment: azure-nightly-release
+    permissions:
+      contents: write
+    steps:
+      - name: Require protected control and Apple Silicon
+        env:
+          CONTROL_REF: ${{ github.ref }}
+        run: test "$CONTROL_REF" = refs/heads/release-control && test "$(uname -m)" = arm64
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: controller
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: azure-nightly-unsigned
+          path: unsigned
+      - name: Sign and notarize artifacts without executing candidate code
+        env:
+          FORK_SIGNING_P12_BASE64: ${{ secrets.FORK_SIGNING_P12_BASE64 }}
+          FORK_SIGNING_P12_PASSWORD: ${{ secrets.FORK_SIGNING_P12_PASSWORD }}
+          FORK_SIGNING_IDENTITY_SHA1: ${{ vars.FORK_SIGNING_IDENTITY_SHA1 }}
+          FORK_APPLE_TEAM_ID: ${{ vars.FORK_APPLE_TEAM_ID }}
+          FORK_NOTARY_KEY_BASE64: ${{ secrets.FORK_NOTARY_KEY_BASE64 }}
+          FORK_NOTARY_KEY_ID: ${{ vars.FORK_NOTARY_KEY_ID }}
+          FORK_NOTARY_ISSUER: ${{ vars.FORK_NOTARY_ISSUER }}
+          EXPECTED_SOURCE_SHA: ${{ needs.integrate.outputs.source_sha }}
+          EXPECTED_VERSION: ${{ needs.integrate.outputs.version }}
+          EXPECTED_UPSTREAM_SHA: ${{ needs.integrate.outputs.upstream_sha }}
+        run: node controller/scripts/azure-nightly/sign.mjs unsigned signed
+      - name: Publish only a complete verified immutable draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node controller/scripts/azure-nightly/publish.mjs signed
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: azure-nightly-signed
+          path: signed/*
+          if-no-files-found: ignore
+      - name: Retain the last good public release on failure
+        if: failure()
+        run: echo 'Integration, checks, signing, notarization or publication failed. No previous release was deleted.' >> "$GITHUB_STEP_SUMMARY"

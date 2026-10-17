@@ -132,8 +132,12 @@ const make = Effect.gen(function* () {
             Effect.orElseSucceed(() => undefined),
           )
       : undefined;
-  const keychainAccessGroup = metadata?.touchIdKeychainAccessGroup;
-  const backend = metadata?.browserPasskeys === true ? backendFor(environment.platform) : undefined;
+  const keychainAccessGroup =
+    process.env.T3CODE_FORK_ISOLATED === "1" ? undefined : metadata?.touchIdKeychainAccessGroup;
+  const backend =
+    process.env.T3CODE_FORK_ISOLATED !== "1" && metadata?.browserPasskeys === true
+      ? backendFor(environment.platform)
+      : undefined;
   const bridgeEnabled = backend !== undefined;
   const sessionsWithHandlers = new WeakSet<Session>();
 

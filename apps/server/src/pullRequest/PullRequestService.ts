@@ -160,7 +160,6 @@ const routingCredential = Context.Reference<{
   readonly credentialFingerprint: string;
   readonly viewer: string;
 } | null>("t3/PullRequestService/routingCredential", { defaultValue: () => null });
-// Internal only: the client cannot choose its cache's credential namespace.
 const encodeCacheKey = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const credentialNamespace = Symbol("pullRequestCredentialNamespace");
 const serverReadScope = Symbol("azureDevOpsServerReadScope");
@@ -897,8 +896,6 @@ export const make = Effect.gen(function* () {
           const repositoryKey = canonicalRepositoryKey(`${host}/${repository}`.toLowerCase());
           if (own?.api.kind === "azure-devops-server" && own.repositoryKey === repositoryKey)
             return Effect.succeed(own);
-          // Azure SSH and legacy clone hosts differ from the browser URL's host. Compare
-          // the complete repository identity before narrowing those checkouts by host.
           return listWorkspaceProjects(
             repositoryKey.startsWith("dev.azure.com/") ? {} : { host },
           ).pipe(
@@ -1294,8 +1291,6 @@ export const make = Effect.gen(function* () {
         seenServerAccounts.add(key);
         return true;
       });
-      // A host that could not be read still has projects, and they are absent from the list.
-      // Reporting them keeps "N repositories were unavailable" honest instead of dropping them.
       const unreadable = selected
         .filter((project) => viewers[project.viewerScope ?? project.host] === undefined)
         .map(({ project, repository }) => ({
@@ -2913,7 +2908,6 @@ export const make = Effect.gen(function* () {
         listingsEpoch,
         input.state,
         input.involvement ?? null,
-        // Positional so two identical filter sets key alike however their record was assembled.
         input.filters === undefined
           ? null
           : [
@@ -2925,7 +2919,6 @@ export const make = Effect.gen(function* () {
               input.filters.excludedLabels ?? null,
             ],
         input.projectId ?? null,
-        // Sorted so the same narrowing keys alike however the caller ordered it.
         input.projectIds === undefined ? null : [...input.projectIds].sort(),
         input.host ?? null,
         input.limit ?? null,

@@ -280,6 +280,28 @@ export const make = Effect.gen(function* BrowserSessionMake() {
           // Turnstile fail its integrity check with error 600010 and recreate
           // the challenge every few seconds, so logins behind it never complete
           // (#5002).
+          if (process.env.T3CODE_FORK_ISOLATED === "1") {
+            browserSession.webRequest.onHeadersReceived((details, callback) => {
+              const responseHeaders = { ...details.responseHeaders };
+              const prior = Object.entries(responseHeaders)
+                .filter(([name]) => name.toLowerCase() === "permissions-policy")
+                .flatMap(([, values]) => values);
+              for (const name of Object.keys(responseHeaders)) {
+                if (name.toLowerCase() === "permissions-policy") delete responseHeaders[name];
+              }
+              const preserved = prior
+                .flatMap((value) => value.split(","))
+                .filter((value) => !/^\s*publickey-credentials-(get|create)\s*=/.test(value));
+              responseHeaders["Permissions-Policy"] = [
+                [
+                  ...preserved,
+                  "publickey-credentials-get=()",
+                  "publickey-credentials-create=()",
+                ].join(", "),
+              ];
+              callback({ responseHeaders });
+            });
+          }
           browserSession.setPermissionRequestHandler(
             (webContents, permission, callback, details) => {
               if (permission === "openExternal") {

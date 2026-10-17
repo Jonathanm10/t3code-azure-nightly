@@ -22,6 +22,8 @@ if (!Number.isInteger(port) || port <= 0) {
 }
 
 const requiredFiles = [
+  "dist-electron/boot.cjs",
+  "dist-electron/profileBootstrap.cjs",
   "dist-electron/main.cjs",
   "dist-electron/electron/WindowsForegroundFocusWorker.cjs",
   "dist-electron/preload.cjs",
@@ -31,7 +33,10 @@ const requiredFiles = [
   "../server/dist/bin.mjs",
 ];
 const watchedDirectories = [
-  { directory: "dist-electron", files: new Set(["main.cjs", "preload.cjs"]) },
+  {
+    directory: "dist-electron",
+    files: new Set(["boot.cjs", "profileBootstrap.cjs", "main.cjs", "preload.cjs"]),
+  },
   {
     directory: "dist-electron/electron",
     files: new Set(["WindowsForegroundFocusWorker.cjs"]),
@@ -109,7 +114,7 @@ function startApp() {
     : [];
   const launchArgs = devProtocolClient
     ? electronArgs
-    : [...electronArgs, `--t3code-dev-root=${desktopDir}`, "dist-electron/main.cjs"];
+    : [...electronArgs, `--t3code-dev-root=${desktopDir}`, "dist-electron/boot.cjs"];
   const electronCommand = resolveElectronLaunchCommand(launchArgs);
   const app = NodeChildProcess.spawn(electronCommand.electronPath, electronCommand.args, {
     cwd: desktopDir,

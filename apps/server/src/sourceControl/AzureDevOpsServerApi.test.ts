@@ -1,6 +1,5 @@
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 // @effect-diagnostics nodeBuiltinImport:off - This integration fixture exercises the real Git helper subprocess and its stdin protocol.
-// @effect-diagnostics preferSchemaOverJson:off - Fixture child source and serialized-error leak assertions must use the actual JSON representation.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";

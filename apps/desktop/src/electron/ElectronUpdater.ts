@@ -4,9 +4,27 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
-import { autoUpdater } from "electron-updater";
+import * as ElectronUpdaterRuntime from "electron-updater";
+import { ElectronAppAdapter } from "electron-updater/out/ElectronAppAdapter.js";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
-type AutoUpdater = typeof autoUpdater;
+class ForkAppAdapter extends ElectronAppAdapter {
+  override get baseCachePath(): string {
+    return process.env.T3CODE_FORK_UPDATE_CACHE ?? super.baseCachePath;
+  }
+}
+
+type AutoUpdater = typeof ElectronUpdaterRuntime.autoUpdater;
+let forkAutoUpdater: AutoUpdater | undefined;
+const getAutoUpdater = (platform: NodeJS.Platform): AutoUpdater => {
+  if (platform === "darwin" && process.env.T3CODE_FORK_UPDATE_CACHE) {
+    return (forkAutoUpdater ??= new ElectronUpdaterRuntime.MacUpdater(
+      undefined,
+      new ForkAppAdapter(),
+    ));
+  }
+  return ElectronUpdaterRuntime.autoUpdater;
+};
 
 export type ElectronUpdaterFeedUrl = Parameters<AutoUpdater["setFeedURL"]>[0];
 
@@ -81,92 +99,96 @@ export class ElectronUpdater extends Context.Service<
 >()("@t3tools/desktop/electron/ElectronUpdater") {}
 
 /** @public Service construction is part of the canonical Effect module API. */
-export const make = ElectronUpdater.of({
-  setFeedURL: (options) =>
-    Effect.suspend(() => {
-      autoUpdater.setFeedURL(options);
-      return Effect.void;
-    }),
-  setAutoDownload: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.autoDownload = value;
-      return Effect.void;
-    }),
-  setAutoInstallOnAppQuit: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.autoInstallOnAppQuit = value;
-      return Effect.void;
-    }),
-  setChannel: (channel) =>
-    Effect.suspend(() => {
-      autoUpdater.channel = channel;
-      return Effect.void;
-    }),
-  setAllowPrerelease: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.allowPrerelease = value;
-      return Effect.void;
-    }),
-  allowDowngrade: Effect.sync(() => autoUpdater.allowDowngrade),
-  setAllowDowngrade: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.allowDowngrade = value;
-      return Effect.void;
-    }),
-  setFullChangelog: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.fullChangelog = value;
-      return Effect.void;
-    }),
-  setDisableDifferentialDownload: (value) =>
-    Effect.suspend(() => {
-      autoUpdater.disableDifferentialDownload = value;
-      return Effect.void;
-    }),
-  checkForUpdates: Effect.suspend(() => {
-    const channel = autoUpdater.channel;
-    return Effect.tryPromise({
-      try: () => autoUpdater.checkForUpdates(),
-      catch: (cause) => new ElectronUpdaterCheckForUpdatesError({ channel, cause }),
-    }).pipe(Effect.asVoid);
-  }),
-  downloadUpdate: Effect.suspend(() => {
-    const channel = autoUpdater.channel;
-    return Effect.tryPromise({
-      try: () => autoUpdater.downloadUpdate(),
-      catch: (cause) => new ElectronUpdaterDownloadUpdateError({ channel, cause }),
-    }).pipe(Effect.asVoid);
-  }),
-  quitAndInstall: ({ isSilent, isForceRunAfter }) =>
-    Effect.suspend(() => {
-      const channel = autoUpdater.channel;
-      return Effect.try({
-        try: () => autoUpdater.quitAndInstall(isSilent, isForceRunAfter),
-        catch: (cause) =>
-          new ElectronUpdaterQuitAndInstallError({
-            channel,
-            isSilent,
-            isForceRunAfter,
-            cause,
-          }),
-      });
-    }),
-  on: (eventName, listener) => {
-    const eventTarget = autoUpdater as unknown as {
-      on: (eventName: string, listener: (...args: Array<unknown>) => void) => void;
-      removeListener: (eventName: string, listener: (...args: Array<unknown>) => void) => void;
-    };
-    const untypedListener = listener as unknown as (...args: Array<unknown>) => void;
-    return Effect.acquireRelease(
-      Effect.sync(() => {
-        eventTarget.on(eventName, untypedListener);
+export const make = Effect.gen(function* () {
+  const platform = yield* HostProcess.Platform;
+
+  return ElectronUpdater.of({
+    setFeedURL: (options) =>
+      Effect.suspend(() => {
+        getAutoUpdater(platform).setFeedURL(options);
+        return Effect.void;
       }),
-      () =>
+    setAutoDownload: (value) =>
+      Effect.suspend(() => {
+        getAutoUpdater(platform).autoDownload = value;
+        return Effect.void;
+      }),
+    setAutoInstallOnAppQuit: (value) =>
+      Effect.suspend(() => {
+        getAutoUpdater(platform).autoInstallOnAppQuit = value;
+        return Effect.void;
+      }),
+    setChannel: (channel) =>
+      Effect.suspend(() => {
+        getAutoUpdater(platform).channel = channel;
+        return Effect.void;
+      }),
+    setAllowPrerelease: (value) =>
+      Effect.suspend(() => {
+        getAutoUpdater(platform).allowPrerelease = value;
+        return Effect.void;
+      }),
+    allowDowngrade: Effect.sync(() => getAutoUpdater(platform).allowDowngrade),
+    setAllowDowngrade: (value) =>
+      Effect.suspend(() => {
+        getAutoUpdater(platform).allowDowngrade = value;
+        return Effect.void;
+      }),
+    setFullChangelog: (value) =>
+      Effect.suspend(() => {
+        getAutoUpdater(platform).fullChangelog = value;
+        return Effect.void;
+      }),
+    setDisableDifferentialDownload: (value) =>
+      Effect.suspend(() => {
+        getAutoUpdater(platform).disableDifferentialDownload = value;
+        return Effect.void;
+      }),
+    checkForUpdates: Effect.suspend(() => {
+      const channel = getAutoUpdater(platform).channel;
+      return Effect.tryPromise({
+        try: () => getAutoUpdater(platform).checkForUpdates(),
+        catch: (cause) => new ElectronUpdaterCheckForUpdatesError({ channel, cause }),
+      }).pipe(Effect.asVoid);
+    }),
+    downloadUpdate: Effect.suspend(() => {
+      const channel = getAutoUpdater(platform).channel;
+      return Effect.tryPromise({
+        try: () => getAutoUpdater(platform).downloadUpdate(),
+        catch: (cause) => new ElectronUpdaterDownloadUpdateError({ channel, cause }),
+      }).pipe(Effect.asVoid);
+    }),
+    quitAndInstall: ({ isSilent, isForceRunAfter }) =>
+      Effect.suspend(() => {
+        const channel = getAutoUpdater(platform).channel;
+        return Effect.try({
+          try: () => getAutoUpdater(platform).quitAndInstall(isSilent, isForceRunAfter),
+          catch: (cause) =>
+            new ElectronUpdaterQuitAndInstallError({
+              channel,
+              isSilent,
+              isForceRunAfter,
+              cause,
+            }),
+        });
+      }),
+    on: (eventName, listener) => {
+      const eventTarget = getAutoUpdater(platform) as unknown as {
+        on: (eventName: string, listener: (...args: Array<unknown>) => void) => void;
+        removeListener: (eventName: string, listener: (...args: Array<unknown>) => void) => void;
+      };
+      const untypedListener = listener as unknown as (...args: Array<unknown>) => void;
+      return Effect.acquireRelease(
         Effect.sync(() => {
-          eventTarget.removeListener(eventName, untypedListener);
+          eventTarget.on(eventName, untypedListener);
         }),
-    ).pipe(Effect.asVoid);
-  },
+        () =>
+          Effect.sync(() => {
+            eventTarget.removeListener(eventName, untypedListener);
+          }),
+      ).pipe(Effect.asVoid);
+    },
+  });
 });
 
-export const layer = Layer.succeed(ElectronUpdater, make);
+export const layer = Layer.effect(ElectronUpdater, make);

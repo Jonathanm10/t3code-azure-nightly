@@ -90,10 +90,14 @@ export default defineConfig({
       dts: false,
       sourcemap: true,
       outExtensions: () => ({ js: ".cjs" }),
-      entry: ["src/boot.ts", "src/compileCache.ts"],
+      entry: ["src/boot.ts", "src/compileCache.ts", "src/profileBootstrap.ts"],
       clean: false,
       deps: {
-        neverBundle: (id) => id === "./main.cjs" || id === "./compileCache.cjs",
+        neverBundle: (id) =>
+          id === "electron" ||
+          id === "./main.cjs" ||
+          id === "./compileCache.cjs" ||
+          id === "./profileBootstrap.cjs",
       },
     },
     {

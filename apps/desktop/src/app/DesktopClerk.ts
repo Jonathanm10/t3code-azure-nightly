@@ -86,7 +86,7 @@ export const desktopClerkFrontendApiHostname = resolveDesktopClerkFrontendApiHos
 function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean) {
   return createClerkBridge({
     storage: storage({ path: stateDir }),
-    passkeys: true,
+    passkeys: false,
     renderer: {
       scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
       host: ElectronProtocol.DESKTOP_HOST,
@@ -189,7 +189,14 @@ export const make = Effect.gen(function* () {
         return true;
       };
       const openAppLink = (value: string | undefined) => {
-        if (!value || promptLinkAppPath(value) === null) return false;
+        if (
+          !value ||
+          !URL.canParse(value) ||
+          new URL(value).protocol !==
+            `${ElectronProtocol.getDesktopScheme(environment.isDevelopment)}:` ||
+          promptLinkAppPath(value) === null
+        )
+          return false;
         void runPromise(webLinks.receive(value));
         return true;
       };

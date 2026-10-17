@@ -14,6 +14,9 @@ try {
       process.platform === "linux"
         ? process.env.XDG_CACHE_HOME || NodePath.join(NodeOS.homedir(), ".cache")
         : NodeOS.tmpdir();
-    NodeModule.enableCompileCache(NodePath.join(cacheRoot, "t3code", "compile-cache"));
+    NodeModule.enableCompileCache(
+      process.env.T3CODE_FORK_COMPILE_CACHE ||
+        NodePath.join(cacheRoot, "t3code-azure-nightly", "compile-cache"),
+    );
   }
 } catch {}

@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
-import { beforeEach, vi } from "vite-plus/test";
+import { afterEach, beforeEach, vi } from "vite-plus/test";
 
 const { autoUpdaterMock } = vi.hoisted(() => ({
   autoUpdaterMock: {
@@ -27,6 +28,8 @@ vi.mock("electron-updater", () => ({
 import * as ElectronUpdater from "./ElectronUpdater.ts";
 
 describe("ElectronUpdater", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
   beforeEach(() => {
     autoUpdaterMock.allowDowngrade = false;
     autoUpdaterMock.allowPrerelease = false;
@@ -108,6 +111,20 @@ describe("ElectronUpdater", () => {
       yield* updater.setFullChangelog(false);
       assert.equal(autoUpdaterMock.fullChangelog, false);
     }).pipe(Effect.provide(ElectronUpdater.layer)),
+  );
+
+  it.effect("uses the injected Linux platform when the fork update cache is set", () =>
+    Effect.gen(function* () {
+      vi.stubEnv("T3CODE_FORK_UPDATE_CACHE", "/tmp/t3-azure-updater-test-cache");
+      const updater = yield* ElectronUpdater.ElectronUpdater;
+
+      yield* updater.setAutoDownload(false);
+
+      assert.equal(autoUpdaterMock.autoDownload, false);
+    }).pipe(
+      Effect.provide(ElectronUpdater.layer),
+      Effect.provideService(HostProcess.Platform, "linux"),
+    ),
   );
 
   it.effect("preserves quit-and-install flags and the execution-time channel", () =>

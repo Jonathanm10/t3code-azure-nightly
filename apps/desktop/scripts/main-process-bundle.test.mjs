@@ -113,12 +113,21 @@ void import("./linux.ts").then(({ result }) => process.emit("ready", result));`,
 it("loads the emitted packaged boot entry and backend cache preload", async () => {
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-desktop-boot-"));
   try {
-    const entries = ["src/boot.ts", "src/compileCache.ts"];
+    const entries = ["src/boot.ts", "src/compileCache.ts", "src/profileBootstrap.ts"];
     await NodeFSP.mkdir(NodePath.join(directory, "src"));
     await Promise.all(
-      entries.map((entry) =>
-        NodeFSP.copyFile(new URL(`../${entry}`, import.meta.url), NodePath.join(directory, entry)),
-      ),
+      entries
+        .filter((entry) => entry !== "src/profileBootstrap.ts")
+        .map((entry) =>
+          NodeFSP.copyFile(
+            new URL(`../${entry}`, import.meta.url),
+            NodePath.join(directory, entry),
+          ),
+        ),
+    );
+    await NodeFSP.writeFile(
+      NodePath.join(directory, "src/profileBootstrap.ts"),
+      'process.env.T3_FORK_BOOTSTRAPPED = "1";',
     );
     assert.ok(Array.isArray(desktopConfig.pack));
     for (const packConfig of desktopConfig.pack) {
@@ -135,7 +144,7 @@ it("loads the emitted packaged boot entry and backend cache preload", async () =
       });
     }
     const outputDirectory = NodePath.join(directory, "dist-electron");
-    const fixture = `console.log(require('node:module').getCompileCacheDir() ? 'cached' : 'uncached');`;
+    const fixture = `if (process.env.T3_FORK_BOOTSTRAPPED !== '1') throw new Error('Profile did not initialize first'); console.log(require('node:module').getCompileCacheDir() ? 'cached' : 'uncached');`;
     await NodeFSP.writeFile(NodePath.join(outputDirectory, "main.cjs"), fixture);
     await NodeFSP.writeFile(
       NodePath.join(outputDirectory, "backend.mjs"),

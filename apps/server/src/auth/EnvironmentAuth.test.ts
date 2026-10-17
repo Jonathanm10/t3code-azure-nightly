@@ -639,6 +639,16 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
         "x-forwarded-host": "box.tail1234.ts.net",
       });
       yield* upgrade({ origin: "t3code://app" });
+      yield* upgrade({ origin: "t3code-azure://app" });
+      yield* upgrade({ origin: "t3code-azure-dev://app" });
+      for (const origin of [
+        "t3code-azure://attacker",
+        "t3code-azure://app:123",
+        "t3code-azure-other://app",
+      ]) {
+        const rejected = yield* Effect.flip(upgrade({ origin }));
+        expect(rejected._tag).toBe("ServerAuthInvalidCredentialError");
+      }
       yield* upgrade({ origin: "http://localhost:5733" });
       yield* upgrade({});
 
