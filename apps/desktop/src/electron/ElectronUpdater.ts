@@ -14,14 +14,16 @@ class ForkAppAdapter extends ElectronAppAdapter {
   }
 }
 
+class ForkMacUpdater extends ElectronUpdaterRuntime.MacUpdater {
+  // A constructor app argument disables electron-updater's native HTTP executor.
+  protected override readonly app = new ForkAppAdapter();
+}
+
 type AutoUpdater = typeof ElectronUpdaterRuntime.autoUpdater;
 let forkAutoUpdater: AutoUpdater | undefined;
 const getAutoUpdater = (platform: NodeJS.Platform): AutoUpdater => {
   if (platform === "darwin" && process.env.T3CODE_FORK_UPDATE_CACHE) {
-    return (forkAutoUpdater ??= new ElectronUpdaterRuntime.MacUpdater(
-      undefined,
-      new ForkAppAdapter(),
-    ));
+    return (forkAutoUpdater ??= new ForkMacUpdater());
   }
   return ElectronUpdaterRuntime.autoUpdater;
 };

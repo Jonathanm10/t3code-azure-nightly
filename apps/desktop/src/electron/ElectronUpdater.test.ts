@@ -1,7 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
-import { afterEach, beforeEach, vi } from "vite-plus/test";
+import { afterAll, afterEach, beforeEach, vi } from "vite-plus/test";
 
 const { autoUpdaterMock } = vi.hoisted(() => ({
   autoUpdaterMock: {
@@ -21,13 +21,91 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("electron-updater", () => ({
-  autoUpdater: autoUpdaterMock,
-}));
+const { electronMock, macUpdaters, requestError, restoreElectron, tempDir } = await vi.hoisted(
+  async () => {
+    const NodeModule = await import("node:module");
+    const NodeEvents = await import("node:events");
+    const NodeFs = await import("node:fs");
+    const NodeOs = await import("node:os");
+    const NodePath = await import("node:path");
+    const tempDir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-updater-executor-"));
+    const requestError = new Error("Electron request boundary reached");
+    const electronMock = {
+      app: {
+        getVersion: () => "1.0.0-nightly.1",
+        getName: () => "T3 updater test",
+        getPath: vi.fn(() => NodePath.join(tempDir, "userData")),
+        isPackaged: true,
+        whenReady: () => Promise.resolve(),
+      },
+      autoUpdater: new NodeEvents.EventEmitter(),
+      net: {
+        request: vi.fn((_options: Electron.ClientRequestConstructorOptions) => {
+          const request = new NodeEvents.EventEmitter();
+          return Object.assign(request, {
+            end: () => {
+              request.emit("login", { isProxy: true }, () => {});
+              request.emit("error", requestError);
+            },
+            abort: () => {},
+          });
+        }),
+      },
+      session: { fromPartition: vi.fn(() => ({ partition: "electron-updater" })) },
+    };
+    // electron-updater requires Electron through CommonJS, outside Vitest's ESM mocks.
+    const require = NodeModule.createRequire(import.meta.url);
+    const electronPath = require.resolve("electron");
+    const previousElectron = require.cache[electronPath];
+    const electronModule = new NodeModule.Module(electronPath);
+    electronModule.exports = electronMock;
+    require.cache[electronPath] = electronModule;
+
+    return {
+      electronMock,
+      macUpdaters: new Array<
+        import("electron-updater").MacUpdater & {
+          readonly cachePath: string;
+          readonly profilePath: string;
+        }
+      >(),
+      requestError,
+      tempDir,
+      restoreElectron: () => {
+        if (previousElectron) require.cache[electronPath] = previousElectron;
+        else delete require.cache[electronPath];
+        NodeFs.rmSync(tempDir, { recursive: true, force: true });
+      },
+    };
+  },
+);
+
+vi.mock("electron-updater", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("electron-updater")>();
+  return {
+    autoUpdater: autoUpdaterMock,
+    MacUpdater: class extends actual.MacUpdater {
+      constructor(...args: ConstructorParameters<typeof actual.MacUpdater>) {
+        super(...args);
+        this.logger = null;
+        macUpdaters.push(this);
+      }
+
+      get cachePath() {
+        return this.app.baseCachePath;
+      }
+
+      get profilePath() {
+        return this.app.userDataPath;
+      }
+    },
+  };
+});
 
 import * as ElectronUpdater from "./ElectronUpdater.ts";
 
 describe("ElectronUpdater", () => {
+  afterAll(restoreElectron);
   afterEach(() => vi.unstubAllEnvs());
 
   beforeEach(() => {
@@ -125,6 +203,43 @@ describe("ElectronUpdater", () => {
       Effect.provide(ElectronUpdater.layer),
       Effect.provideService(HostProcess.Platform, "linux"),
     ),
+  );
+
+  it.effect("keeps native requests and proxy login with isolated macOS profile caches", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        for (const profile of ["profile-a", "profile-b"]) {
+          vi.resetModules();
+          electronMock.net.request.mockClear();
+          const cachePath = `${tempDir}/${profile}/update-cache`;
+          const profilePath = `${tempDir}/${profile}/userData`;
+          vi.stubEnv("T3CODE_FORK_UPDATE_CACHE", cachePath);
+          electronMock.app.getPath.mockReturnValue(profilePath);
+          const freshModule = yield* Effect.promise(() => import("./ElectronUpdater.ts"));
+          const updater = yield* freshModule.make;
+          const login = vi.fn();
+          yield* updater.on("login", login);
+          yield* updater.setChannel("nightly");
+          yield* updater.setFeedURL({ provider: "github", owner: "test", repo: "updater" });
+
+          const error = yield* updater.checkForUpdates.pipe(Effect.flip);
+
+          assert.strictEqual(error.cause, requestError);
+          assert.equal(error.channel, "nightly");
+          assert.equal(electronMock.net.request.mock.calls.length, 1);
+          assert.equal(electronMock.net.request.mock.calls[0]?.[0].hostname, "github.com");
+          assert.equal(
+            electronMock.net.request.mock.calls[0]?.[0].path,
+            "/test/updater/releases.atom",
+          );
+          assert.equal(login.mock.calls.length, 1);
+          assert.deepEqual(login.mock.calls[0]?.[0], { isProxy: true });
+          assert.equal(macUpdaters.at(-1)?.cachePath, cachePath);
+          assert.equal(macUpdaters.at(-1)?.profilePath, profilePath);
+        }
+        assert.equal(macUpdaters.length, 2);
+      }),
+    ).pipe(Effect.provideService(HostProcess.Platform, "darwin")),
   );
 
   it.effect("preserves quit-and-install flags and the execution-time channel", () =>
