@@ -39,7 +39,9 @@ Writes do not retry automatically. Revision conflicts require a fresh read. An `
 
 Page cursors belong to the current MCP process, checkout, verified identity and query. Use subsequent pages in the same process. After a restart or credential change, start the listing again.
 
-Stdio requests and tool responses are capped at 1 MiB. Four tool calls can be active concurrently. Cancellation aborts owned Git processes and HTTP requests. Use smaller pages when output reaches the limit. Each packed artifact includes `provenance.json` with package/core versions and the supplied source commit.
+Stdio requests and complete JSON-RPC response frames are capped at 1 MiB. Request IDs are limited to 256 characters. Four tool calls can be active concurrently. Cancellation aborts owned Git processes and HTTP requests. Successful responses include both text and `structuredContent` to satisfy the advertised output schema.
+
+A `completed` result with `isError: false` means the write succeeded but its full result exceeded the limit. Do not repeat the write. Its receipt preserves the resource identity, revision when available, API URL and `readBack` tool name and arguments. Run that read and match the resource ID, paging when needed. Work item receipts select identity fields so the recheck stays small; `workItems.get` also accepts a bounded `fields` selection for inspecting individual fields. Oversized reads require smaller pages or selected fields. Each packed artifact includes `provenance.json` with package/core versions and the supplied source commit.
 
 Build both public tarballs without credentials or publication:
 

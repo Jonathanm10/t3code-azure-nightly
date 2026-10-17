@@ -1,6 +1,7 @@
 /* oxlint-disable t3code/no-global-process-runtime -- This standalone package has no T3 runtime dependency; this module is the Node host boundary. */
 // @effect-diagnostics nodeBuiltinImport:off -- This standalone adapter owns bounded Git subprocesses without a host runtime.
 // @effect-diagnostics globalTimers:off -- Subprocess deadlines terminate only the process group created by this adapter.
+// @effect-diagnostics globalTimersInEffect:off -- Process-group escalation must outlive interruption of the owning Effect callback.
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
 import * as NodeFSP from "node:fs/promises";
@@ -11,7 +12,7 @@ import { FetchHttpClient } from "effect/http";
 import { makeAzureServerClient, type GitProcessInput, type GitProcessOutput } from "./client.ts";
 import { AzureServerProfile } from "./profile.ts";
 import { AzureServerError } from "./errors.ts";
-import { operationCatalog } from "./operations.ts";
+import { withOperationDefaults } from "./operations.ts";
 
 const runGit = (input: GitProcessInput) =>
   Effect.callback<GitProcessOutput, AzureServerError>((resume) => {
@@ -89,7 +90,6 @@ const runGit = (input: GitProcessInput) =>
     });
   });
 
-const decodeArguments = Schema.decodeUnknownOption(Schema.JsonObject);
 const decodeProfile = Schema.decodeUnknownEffect(AzureServerProfile);
 
 export const makeNodeAzureServerClient = (
@@ -119,27 +119,8 @@ export const makeNodeAzureServerClient = (
       ...(profile.remoteUrl === undefined ? {} : { remoteUrl: profile.remoteUrl }),
     };
     return {
-      execute: (name: string, value: unknown) => {
-        const decoded = decodeArguments(value);
-        if (decoded._tag === "None") return client.execute(input, name, value);
-        const schema = operationCatalog.find((operation) => operation.name === name)?.inputSchema;
-        const properties =
-          schema !== undefined &&
-          "properties" in schema &&
-          typeof schema.properties === "object" &&
-          schema.properties !== null
-            ? schema.properties
-            : {};
-        return client.execute(input, name, {
-          ...(Object.hasOwn(properties, "project") && profile.defaultProject !== undefined
-            ? { project: profile.defaultProject }
-            : {}),
-          ...(Object.hasOwn(properties, "team") && profile.defaultTeam !== undefined
-            ? { team: profile.defaultTeam }
-            : {}),
-          ...decoded.value,
-        });
-      },
+      execute: (name: string, value: unknown) =>
+        client.execute(input, name, withOperationDefaults(name, value, profile)),
       withSession: <A, E, R>(use: Parameters<typeof client.withSession<A, E, R>>[1]) =>
         client.withSession(input, use),
     };

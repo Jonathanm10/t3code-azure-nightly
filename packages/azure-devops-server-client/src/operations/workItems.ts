@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as S from "../schemas.ts";
+import { workItemReceipt, workItemCommentReceipt } from "../receipts.ts";
 import { AzureServerError } from "../errors.ts";
 import type { OperationContext } from "../transport.ts";
 import {
@@ -16,8 +17,16 @@ import {
   encodeCursor,
 } from "../operation.ts";
 
-export const getWorkItem = (context: OperationContext, input: { project: string; id: number }) =>
-  read(context, workItemRoute(input), S.WorkItem, { $expand: "All" });
+export const getWorkItem = (
+  context: OperationContext,
+  input: { project: string; id: number; fields?: typeof S.FieldSelection.Type },
+) =>
+  read(
+    context,
+    workItemRoute(input),
+    S.WorkItem,
+    input.fields === undefined ? { $expand: "All" } : { fields: input.fields.join(",") },
+  );
 export const checkRevision = (
   context: OperationContext,
   input: { project: string; id: number; expectedRevision: number },
@@ -99,9 +108,13 @@ const commentPage = Schema.Struct({
 });
 export const workItems = {
   "workItems.get": define(
-    Schema.Struct(S.WorkItemInput),
+    Schema.Struct({ ...S.WorkItemInput, fields: Schema.optionalKey(S.FieldSelection) }),
     S.WorkItem,
-    { description: "Read a work item, revision, fields and relations.", readOnly: true },
+    {
+      description:
+        "Read a work item, revision, fields and relations. Select fields to omit other fields and relations from large items.",
+      readOnly: true,
+    },
     (input, context) => getWorkItem(context, input),
   ),
   "workItems.batch": define(
@@ -126,7 +139,7 @@ export const workItems = {
     (input, context) => wiql(context, input),
   ),
   "workItems.search": define(
-    Schema.Struct({ ...S.ProjectInput, text: S.Name, limit: Schema.optionalKey(S.Limit) }),
+    Schema.Struct({ ...S.ProjectInput, text: S.DisplayText, limit: Schema.optionalKey(S.Limit) }),
     S.WorkItemLinks,
     { description: "Search titles within a project using WIQL.", readOnly: true },
     (input, context) =>
@@ -184,13 +197,14 @@ export const workItems = {
     Schema.Struct({
       ...S.ProjectInput,
       type: S.Name,
-      title: S.Name,
+      title: S.DisplayText,
       fields: Schema.optionalKey(fieldEdits),
     }),
     S.WorkItem,
     {
       description: "Create a work item. Reconcile uncertain writes by searching before retrying.",
       readOnly: false,
+      receipt: workItemReceipt,
       reconcile: "workItems.search",
     },
     (input, context) =>
@@ -217,6 +231,7 @@ export const workItems = {
       description:
         "Edit discovered writable fields using an expected revision. State, assignment, iteration and board fields use dedicated tools.",
       readOnly: false,
+      receipt: workItemReceipt,
       idempotent: true,
       reconcile: "workItems.get",
     },
@@ -233,6 +248,7 @@ export const workItems = {
       description:
         "Assign to a resolved identity GUID, or clear assignment, with a revision check.",
       readOnly: false,
+      receipt: workItemReceipt,
       idempotent: true,
       reconcile: "workItems.get",
     },
@@ -265,11 +281,12 @@ export const workItems = {
       }),
   ),
   "workItems.transition": define(
-    Schema.Struct({ ...S.RevisionInput, state: S.Name }),
+    Schema.Struct({ ...S.RevisionInput, state: S.DisplayText }),
     S.WorkItem,
     {
       description: "Move a work item to a valid type state with an expected revision.",
       readOnly: false,
+      receipt: workItemReceipt,
       idempotent: true,
       reconcile: "workItems.get",
     },
@@ -300,6 +317,7 @@ export const workItems = {
       description:
         "Add a comment through 6.0-preview.3 after checking the current revision. The comments API has no atomic revision condition.",
       readOnly: false,
+      receipt: workItemCommentReceipt,
       reconcile: "workItems.comments",
     },
     (input, context) =>
@@ -331,6 +349,7 @@ export const workItems = {
     {
       description: "Link two work items in this collection with an expected revision.",
       readOnly: false,
+      receipt: workItemReceipt,
       reconcile: "workItems.relations",
     },
     (input, context) =>
@@ -354,6 +373,7 @@ export const workItems = {
     {
       description: "Remove a relation by its index from the expected work item revision.",
       readOnly: false,
+      receipt: workItemReceipt,
       destructive: true,
       reconcile: "workItems.relations",
     },

@@ -1,12 +1,12 @@
 import { build } from "esbuild";
 import { operationCatalog, CLIENT_VERSION } from "@jonathanm10/azure-devops-server-client";
 import { MCP_VERSION } from "../src/server.ts";
-import { mkdtemp, mkdir, readFile, writeFile, cp, chmod, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { resolve, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
+import * as NodeChildProcess from "node:child_process";
+const root = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "../../..");
 const args = process.argv.slice(2);
 const outIndex = args.indexOf("--out");
 const sourceIndex = args.indexOf("--source");
@@ -19,15 +19,15 @@ if (
   throw new Error(
     "Usage: node packages/azure-devops-server-mcp/scripts/pack.mjs --out <directory> --source <40-hex-source-commit>",
   );
-const out = resolve(args[outIndex + 1]);
+const out = NodePath.resolve(args[outIndex + 1]);
 const source = args[sourceIndex + 1];
-const actualSource = execFileSync("git", ["rev-parse", "HEAD"], {
+const actualSource = NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], {
   cwd: root,
   encoding: "utf8",
 }).trim();
 if (actualSource !== source) throw new Error("Source commit must be the checkout HEAD");
 const sourceTreeDirty =
-  execFileSync(
+  NodeChildProcess.execFileSync(
     "git",
     [
       "status",
@@ -39,14 +39,21 @@ const sourceTreeDirty =
     ],
     { cwd: root, encoding: "utf8" },
   ).trim().length > 0;
-await mkdir(out, { recursive: true });
-const staging = await mkdtemp(join(tmpdir(), "azure-server-pack-"));
+const effectDirectory = NodePath.join(root, "packages/azure-devops-server-mcp/node_modules/effect");
+const effect = JSON.parse(
+  await NodeFSP.readFile(NodePath.join(effectDirectory, "package.json"), "utf8"),
+);
+const effectLicense = await NodeFSP.readFile(NodePath.join(effectDirectory, "LICENSE"), "utf8");
+await NodeFSP.mkdir(out, { recursive: true });
+const staging = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "azure-server-pack-"));
 try {
   for (const name of ["client", "mcp"]) {
-    const sourceDir = join(root, `packages/azure-devops-server-${name}`);
-    const target = join(staging, name);
-    await mkdir(join(target, "dist"), { recursive: true });
-    const original = JSON.parse(await readFile(join(sourceDir, "package.json"), "utf8"));
+    const sourceDir = NodePath.join(root, `packages/azure-devops-server-${name}`);
+    const target = NodePath.join(staging, name);
+    await NodeFSP.mkdir(NodePath.join(target, "dist"), { recursive: true });
+    const original = JSON.parse(
+      await NodeFSP.readFile(NodePath.join(sourceDir, "package.json"), "utf8"),
+    );
     if (original.version !== (name === "client" ? CLIENT_VERSION : MCP_VERSION))
       throw new Error("Package and runtime versions disagree");
     const metadata = {
@@ -56,7 +63,10 @@ try {
       source,
       sourceTreeDirty,
     };
-    await writeFile(join(target, "provenance.json"), JSON.stringify(metadata, null, 2) + "\n");
+    await NodeFSP.writeFile(
+      NodePath.join(target, "provenance.json"),
+      JSON.stringify(metadata, null, 2) + "\n",
+    );
     const manifest = {
       name: original.name,
       version: original.version,
@@ -85,29 +95,29 @@ try {
       platform: "node",
       format: "esm",
       target: "node24",
-      outdir: join(target, "dist"),
+      outdir: NodePath.join(target, "dist"),
       ...(name === "client" ? { external: ["effect", "effect/*"] } : {}),
       legalComments: "eof",
     });
     if (name === "client")
-      execFileSync(
-        join(root, "node_modules/.bin/tsc-rs"),
+      NodeChildProcess.execFileSync(
+        NodePath.join(root, "node_modules/.bin/tsc-rs"),
         [
           "-p",
-          join(sourceDir, "tsconfig.build.json"),
+          NodePath.join(sourceDir, "tsconfig.build.json"),
           "--rootDir",
-          join(sourceDir, "src"),
+          NodePath.join(sourceDir, "src"),
           "--noEmit",
           "false",
           "--declaration",
           "--emitDeclarationOnly",
           "--outDir",
-          join(target, "dist/types"),
+          NodePath.join(target, "dist/types"),
         ],
         { cwd: root, stdio: "inherit" },
       );
     if (name === "client") {
-      manifest.dependencies = { effect: "4.0.5" };
+      manifest.dependencies = { effect: effect.version };
       manifest.exports["./addresses"] = {
         types: "./dist/types/addresses.d.ts",
         import: "./dist/addresses.js",
@@ -119,18 +129,18 @@ try {
     } else {
       manifest.bin = { "azure-devops-server-mcp": "./dist/main.js" };
       delete manifest.exports["."].types;
-      await chmod(join(target, "dist/main.js"), 0o755);
-      await writeFile(
-        join(target, "THIRD_PARTY_NOTICES.txt"),
-        "Effect 4.0.5\n" + (await readFile(join(sourceDir, "node_modules/effect/LICENSE"), "utf8")),
+      await NodeFSP.chmod(NodePath.join(target, "dist/main.js"), 0o755);
+      await NodeFSP.writeFile(
+        NodePath.join(target, "THIRD_PARTY_NOTICES.txt"),
+        `Effect ${effect.version}\n${effectLicense}`,
       );
     }
-    await writeFile(
-      join(target, "operation-catalog.json"),
+    await NodeFSP.writeFile(
+      NodePath.join(target, "operation-catalog.json"),
       JSON.stringify(operationCatalog, null, 2) + "\n",
     );
-    await writeFile(
-      join(target, "TOOLS.md"),
+    await NodeFSP.writeFile(
+      NodePath.join(target, "TOOLS.md"),
       "# Azure DevOps Server operations\n\nGenerated from the executable operation registry.\n\n| Operation | Access | Description |\n| --- | --- | --- |\n" +
         operationCatalog
           .map(
@@ -140,10 +150,13 @@ try {
           .join("\n") +
         "\n",
     );
-    await cp(join(sourceDir, "README.md"), join(target, "README.md"));
-    await cp(join(root, "LICENSE"), join(target, "LICENSE"));
-    await writeFile(join(target, "package.json"), JSON.stringify(manifest, null, 2) + "\n");
-    execFileSync("npm", ["pack", "--ignore-scripts", "--pack-destination", out], {
+    await NodeFSP.cp(NodePath.join(sourceDir, "README.md"), NodePath.join(target, "README.md"));
+    await NodeFSP.cp(NodePath.join(root, "LICENSE"), NodePath.join(target, "LICENSE"));
+    await NodeFSP.writeFile(
+      NodePath.join(target, "package.json"),
+      JSON.stringify(manifest, null, 2) + "\n",
+    );
+    NodeChildProcess.execFileSync("npm", ["pack", "--ignore-scripts", "--pack-destination", out], {
       cwd: target,
       stdio: "pipe",
     });
@@ -151,10 +164,10 @@ try {
   process.stdout.write(
     JSON.stringify({
       source,
-      client: join(out, "jonathanm10-azure-devops-server-client-0.1.0.tgz"),
-      mcp: join(out, "jonathanm10-azure-devops-server-mcp-0.1.0.tgz"),
+      client: NodePath.join(out, "jonathanm10-azure-devops-server-client-0.1.0.tgz"),
+      mcp: NodePath.join(out, "jonathanm10-azure-devops-server-mcp-0.1.0.tgz"),
     }) + "\n",
   );
 } finally {
-  await rm(staging, { recursive: true, force: true });
+  await NodeFSP.rm(staging, { recursive: true, force: true });
 }

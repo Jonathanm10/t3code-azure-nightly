@@ -5,6 +5,11 @@ export const Name = Schema.String.check(
   Schema.isMaxLength(256),
   Schema.isPattern(/^(?!\.{1,2}$)[^/\\\r\n\0]+$/u),
 );
+export const DisplayText = Schema.String.check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(256),
+  Schema.isPattern(/^[^\r\n\0]+$/u),
+);
 export const Text = Schema.String.check(Schema.isMaxLength(65536));
 export const Id = Schema.Int.check(Schema.isGreaterThan(0));
 export const Guid = Schema.String.check(
@@ -14,6 +19,10 @@ export const Commit = Schema.String.check(Schema.isPattern(/^[\da-f]{40}$/iu));
 export const Limit = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }));
 export const Offset = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 10000 }));
 export const FieldName = Schema.String.check(Schema.isPattern(/^[a-zA-Z][a-zA-Z0-9_.-]{0,255}$/u));
+export const FieldSelection = Schema.Array(FieldName).check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(50),
+);
 export const FieldValue = Schema.Union([
   Schema.String.check(Schema.isMaxLength(65536)),
   Schema.Number,

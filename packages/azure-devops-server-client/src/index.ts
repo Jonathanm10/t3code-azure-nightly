@@ -16,10 +16,13 @@ export {
 export {
   operationCatalog,
   operationIsRead,
+  completedWriteReceipt,
+  withOperationDefaults,
   isOperationName,
   type OperationName,
   type OperationInput,
   type OperationOutput,
 } from "./operations.ts";
+export { WriteReceipt } from "./receipts.ts";
 export const CLIENT_VERSION = "0.1.0";
 export { makeNodeAzureServerClient } from "./node.ts";

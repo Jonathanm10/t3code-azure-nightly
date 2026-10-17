@@ -6,6 +6,7 @@ import { discovery } from "./operations/discovery.ts";
 import { workItems } from "./operations/workItems.ts";
 import { boards } from "./operations/boards.ts";
 import { pullRequests } from "./operations/pullRequests.ts";
+import type { AzureServerProfile } from "./profile.ts";
 
 const registry = { ...discovery, ...workItems, ...boards, ...pullRequests };
 export type OperationName = keyof typeof registry;
@@ -45,3 +46,37 @@ export const executeUnknownOperation = (
 
 export const validateOperationInput = (name: OperationName, input: unknown) =>
   registry[name].validate(input);
+
+export const completedWriteReceipt = (
+  name: OperationName,
+  input: unknown,
+  output: unknown,
+  collection: string,
+) => registry[name].receipt(input, output, collection);
+
+const decodeArguments = Schema.decodeUnknownOption(Schema.JsonObject);
+export const withOperationDefaults = (
+  name: string,
+  input: unknown,
+  profile: AzureServerProfile,
+) => {
+  const decoded = decodeArguments(input);
+  if (decoded._tag === "None") return input;
+  const schema = operationCatalog.find((operation) => operation.name === name)?.inputSchema;
+  const properties =
+    schema !== undefined &&
+    "properties" in schema &&
+    typeof schema.properties === "object" &&
+    schema.properties !== null
+      ? schema.properties
+      : {};
+  return {
+    ...(Object.hasOwn(properties, "project") && profile.defaultProject !== undefined
+      ? { project: profile.defaultProject }
+      : {}),
+    ...(Object.hasOwn(properties, "team") && profile.defaultTeam !== undefined
+      ? { team: profile.defaultTeam }
+      : {}),
+    ...decoded.value,
+  };
+};

@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as S from "../schemas.ts";
+import { pullRequestReceipt, threadReceipt, commentReceipt, reviewerReceipt } from "../receipts.ts";
 import { AzureServerError } from "../errors.ts";
 import {
   define,
@@ -218,7 +219,7 @@ export const pullRequests = {
   "pullRequests.create": define(
     Schema.Struct({
       ...S.RepositoryInput,
-      title: S.Name,
+      title: S.DisplayText,
       description: S.Text,
       sourceRef: ref,
       targetRef: ref,
@@ -228,6 +229,7 @@ export const pullRequests = {
     {
       description: "Create a pull request with explicit branches and draft state.",
       readOnly: false,
+      receipt: pullRequestReceipt,
       reconcile: "pullRequests.list",
     },
     (input, context) =>
@@ -242,7 +244,7 @@ export const pullRequests = {
   "pullRequests.edit": define(
     Schema.Struct({
       ...S.PullRequestInput,
-      title: S.Name,
+      title: S.DisplayText,
       description: S.Text,
       isDraft: Schema.Boolean,
     }),
@@ -250,6 +252,7 @@ export const pullRequests = {
     {
       description: "Set pull request title, description and draft state.",
       readOnly: false,
+      receipt: pullRequestReceipt,
       idempotent: true,
       reconcile: "pullRequests.get",
     },
@@ -266,6 +269,7 @@ export const pullRequests = {
     {
       description: "Create a discussion thread on a pull request.",
       readOnly: false,
+      receipt: threadReceipt,
       reconcile: "pullRequests.threads",
     },
     (input, context) =>
@@ -280,6 +284,7 @@ export const pullRequests = {
     {
       description: "Reply to a pull request discussion thread.",
       readOnly: false,
+      receipt: commentReceipt,
       reconcile: "pullRequests.threads",
     },
     (input, context) =>
@@ -297,6 +302,7 @@ export const pullRequests = {
     {
       description: "Edit a pull request comment.",
       readOnly: false,
+      receipt: commentReceipt,
       idempotent: true,
       reconcile: "pullRequests.threads",
     },
@@ -318,6 +324,7 @@ export const pullRequests = {
     {
       description: "Set a discussion thread state.",
       readOnly: false,
+      receipt: threadReceipt,
       idempotent: true,
       reconcile: "pullRequests.threads",
     },
@@ -332,6 +339,7 @@ export const pullRequests = {
     {
       description: "Set the verified viewer's review vote. Cannot impersonate another reviewer.",
       readOnly: false,
+      receipt: reviewerReceipt,
       idempotent: true,
       reconcile: "pullRequests.reviewers",
     },
@@ -350,6 +358,7 @@ export const pullRequests = {
     {
       description: "Add a reviewer by resolved identity GUID.",
       readOnly: false,
+      receipt: reviewerReceipt,
       idempotent: true,
       reconcile: "pullRequests.reviewers",
     },
@@ -368,6 +377,8 @@ export const pullRequests = {
     {
       description: "Remove a reviewer by GUID.",
       readOnly: false,
+      receipt: (input, _result, collection) =>
+        reviewerReceipt(input, { id: input.identityId }, collection),
       idempotent: true,
       destructive: true,
       reconcile: "pullRequests.reviewers",
@@ -386,6 +397,7 @@ export const pullRequests = {
     {
       description: "Abandon or reactivate a pull request.",
       readOnly: false,
+      receipt: pullRequestReceipt,
       idempotent: true,
       reconcile: "pullRequests.get",
     },
@@ -404,6 +416,7 @@ export const pullRequests = {
       description:
         "Complete against an expected source commit with an explicit strategy and branch-deletion choice. Never bypass policies.",
       readOnly: false,
+      receipt: pullRequestReceipt,
       destructive: true,
       reconcile: "pullRequests.get",
     },

@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as S from "../schemas.ts";
+import { workItemReceipt } from "../receipts.ts";
 import { AzureServerError } from "../errors.ts";
 import {
   define,
@@ -139,8 +140,8 @@ export const boards = {
       ...S.BoardInput,
       id: S.Id,
       expectedRevision: S.Id,
-      column: S.Name,
-      lane: Schema.optionalKey(S.Name),
+      column: S.DisplayText,
+      lane: Schema.optionalKey(S.DisplayText),
       done: Schema.optionalKey(Schema.Boolean),
     }),
     S.WorkItem,
@@ -148,6 +149,7 @@ export const boards = {
       description:
         "Move a card using the board's actual column, state, lane and done field mappings, then reread it.",
       readOnly: false,
+      receipt: workItemReceipt,
       idempotent: true,
       reconcile: "workItems.get",
     },
@@ -201,6 +203,7 @@ export const boards = {
       description:
         "Assign a work item to a discovered team iteration path with an expected revision.",
       readOnly: false,
+      receipt: workItemReceipt,
       idempotent: true,
       reconcile: "workItems.get",
     },

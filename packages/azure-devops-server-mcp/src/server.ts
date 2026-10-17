@@ -7,6 +7,9 @@ import {
   operationCatalog,
   operationIsRead,
   isOperationName,
+  completedWriteReceipt,
+  withOperationDefaults,
+  WriteReceipt,
   type AzureServerProfile,
   type AzureServerError,
   CLIENT_VERSION,
@@ -16,7 +19,9 @@ export const MCP_VERSION = "0.1.0";
 export type Access = "read" | "read-write";
 const Rpc = Schema.Struct({
   jsonrpc: Schema.Literal("2.0"),
-  id: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
+  id: Schema.optionalKey(
+    Schema.Union([Schema.String.check(Schema.isMaxLength(256)), Schema.Number]),
+  ),
   method: Schema.String,
   params: Schema.optionalKey(Schema.JsonObject),
 });
@@ -26,6 +31,7 @@ const Call = Schema.Struct({
 });
 const parseRpc = Schema.decodeUnknownOption(Schema.fromJsonString(Rpc));
 const parseCall = Schema.decodeUnknownOption(Call);
+const writeReceiptSchema = Schema.toJsonSchemaDocument(WriteReceipt).schema;
 const safeOutcome = (error: AzureServerError, operation: string) => ({
   kind:
     error.category === "conflict"
@@ -60,6 +66,19 @@ export const toolsForAccess = (access: Access) =>
             properties: { kind: { const: "ok" }, value: operation.outputSchema },
             required: ["kind", "value"],
           },
+          ...(!operation.readOnly
+            ? [
+                {
+                  type: "object",
+                  properties: {
+                    kind: { const: "completed" },
+                    receipt: writeReceiptSchema,
+                    message: { type: "string" },
+                  },
+                  required: ["kind", "receipt", "message"],
+                },
+              ]
+            : []),
           {
             type: "object",
             properties: {
@@ -102,7 +121,10 @@ export async function serveAzureMcp(options: {
   let ready = false;
   let closed = false;
   const send = (value: unknown) => {
-    if (!closed) options.output.write(JSON.stringify(value) + "\n");
+    const frame = JSON.stringify(value) + "\n";
+    if (Buffer.byteLength(frame) > 1024 * 1024) return false;
+    if (!closed) options.output.write(frame);
+    return true;
   };
   const error = (id: string | number | null, code: number, message: string) =>
     send({ jsonrpc: "2.0", id, error: { code, message } });
@@ -178,9 +200,10 @@ export async function serveAzureMcp(options: {
       error(id, -32000, "Too many concurrent requests");
       return;
     }
+    const args = withOperationDefaults(name, call.value.arguments ?? {}, options.profile);
     const controller = new AbortController();
     const completion = Effect.runPromise(
-      client.execute(name, call.value.arguments ?? {}).pipe(
+      client.execute(name, args).pipe(
         Effect.match({
           onFailure: (failure) => safeOutcome(failure, name),
           onSuccess: (value) => ({ kind: "ok", value }),
@@ -190,32 +213,32 @@ export async function serveAzureMcp(options: {
     )
       .then((outcome) => {
         const text = JSON.stringify(outcome);
-        if (
-          Buffer.byteLength(
-            JSON.stringify({ content: [{ type: "text", text }], structuredContent: outcome }),
-          ) >
-          1024 * 1024 - 256
-        ) {
-          result(id, {
-            isError: true,
-            structuredContent: { kind: "failed", code: "output-limit" },
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  kind: "failed",
-                  code: "output-limit",
-                  message: "Result exceeds 1 MiB. Use a smaller page or narrower read.",
-                }),
-              },
-            ],
-          });
-          return;
-        }
-        result(id, {
+        const full = {
           isError: outcome.kind !== "ok",
           content: [{ type: "text", text }],
-          structuredContent: outcome,
+        };
+        if (result(id, { ...full, structuredContent: outcome })) return;
+        const receipt =
+          "value" in outcome && !operationIsRead(name)
+            ? completedWriteReceipt(name, args, outcome.value, options.profile.apiCollectionUrl)
+            : null;
+        const bounded =
+          receipt === null
+            ? {
+                kind: "failed",
+                code: "output-limit",
+                message: "Result exceeds 1 MiB. Use a smaller page or narrower read.",
+              }
+            : {
+                kind: "completed",
+                receipt,
+                message:
+                  "The write succeeded. Do not repeat it. The full result exceeds 1 MiB; use receipt.readBack and match the resource ID, paging when needed.",
+              };
+        result(id, {
+          isError: receipt === null,
+          content: [{ type: "text", text: JSON.stringify(bounded) }],
+          structuredContent: bounded,
         });
       })
       .catch(() => {

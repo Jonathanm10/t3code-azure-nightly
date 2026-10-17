@@ -48,7 +48,7 @@ export const discovery = {
       }),
   ),
   "identities.search": define(
-    Schema.Struct({ query: S.Name, ...S.PageInput }),
+    Schema.Struct({ query: S.DisplayText, ...S.PageInput }),
     S.pageOf(S.Identity),
     { description: "Resolve collection people and groups to identity GUIDs.", readOnly: true },
     (input, context) =>

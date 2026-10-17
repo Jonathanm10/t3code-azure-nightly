@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { AzureServerError } from "./errors.ts";
+import type { WriteReceipt } from "./receipts.ts";
 import type { OperationContext } from "./transport.ts";
 
 export const parse = <T>(schema: Schema.ConstraintDecoder<T>, value: unknown) =>
@@ -40,14 +41,18 @@ export function define<I, O>(
   output: Schema.ConstraintDecoder<O>,
   metadata: {
     description: string;
-    readOnly: boolean;
     idempotent?: boolean;
     destructive?: boolean;
     reconcile?: string;
-  },
+  } & (
+    | { readOnly: true }
+    | { readOnly: false; receipt: (input: I, output: O, collection: string) => WriteReceipt }
+  ),
   handler: (input: I, context: OperationContext) => Effect.Effect<O, AzureServerError>,
 ) {
   const decodeInput = Schema.decodeUnknownEffect(input);
+  const receiptInput = Schema.decodeUnknownSync(input);
+  const receiptOutput = Schema.decodeUnknownSync(output);
   return {
     validate: (value: unknown) =>
       decodeInput(value, { onExcessProperty: "error" }).pipe(
@@ -58,6 +63,10 @@ export function define<I, O>(
     input,
     output,
     ...metadata,
+    receipt: (value: unknown, result: unknown, collection: string) =>
+      metadata.readOnly
+        ? null
+        : metadata.receipt(receiptInput(value), receiptOutput(result), collection),
     run: (value: unknown, context: OperationContext) => {
       if (!metadata.readOnly && context.access === "read")
         return Effect.fail(new AzureServerError({ operation: "access", category: "denied" }));

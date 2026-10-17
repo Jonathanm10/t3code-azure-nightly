@@ -9,7 +9,12 @@ import * as Schema from "effect/Schema";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import * as NodeFS from "node:fs";
-import { operationCatalog } from "@jonathanm10/azure-devops-server-client";
+import {
+  operationCatalog,
+  completedWriteReceipt,
+  isOperationName,
+  WriteReceipt,
+} from "@jonathanm10/azure-devops-server-client";
 
 const viewer = "11111111-1111-1111-1111-111111111111";
 const commit = "a".repeat(40);
@@ -31,6 +36,7 @@ const Outcome = Schema.Struct({
   reconcile: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 const parseOutcome = Schema.decodeUnknownSync(Outcome);
+const parseReceipt = Schema.decodeUnknownSync(WriteReceipt);
 const parseContent = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ text: Schema.String })));
 const parseTools = Schema.decodeUnknownSync(
   Schema.Array(
@@ -358,6 +364,7 @@ async function fixture(access = "read-write") {
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
   return {
     launch,
+    collection,
     holdHttp: () => {
       let started: () => void = () => {},
         closed: () => void = () => {};
@@ -425,6 +432,43 @@ it("performs every registered write over real TLS and private-stdin Git, with re
     const before = f.requests.length;
     const result = await f.call(name, input);
     expect(result, JSON.stringify({ name, result })).toMatchObject({ kind: "ok" });
+    if (!isOperationName(name)) throw new Error("Unknown fixture operation");
+    const receipt = parseReceipt(completedWriteReceipt(name, input, result.value, f.collection));
+    expect(receipt.resource.url).toContain(f.collection);
+    expect(
+      operationCatalog.some(
+        (operation) =>
+          operation.readOnly &&
+          `azure_${operation.name.replaceAll(".", "_")}` === receipt.readBack.tool,
+      ),
+    ).toBe(true);
+    switch (receipt.resource.kind) {
+      case "workItem":
+        expect(receipt.resource).toMatchObject({
+          id: name === "workItems.create" ? 43 : 42,
+          revision: name === "workItems.create" ? 1 : f.item.rev,
+        });
+        break;
+      case "workItemComment":
+        expect(receipt.resource).toMatchObject({ id: 1, workItemId: 42 });
+        break;
+      case "pullRequest":
+        expect(receipt.resource).toMatchObject({ id: 7, sourceCommit: commit });
+        break;
+      case "pullRequestThread":
+        expect(receipt.resource).toMatchObject({ id: 1, pullRequestId: 7 });
+        break;
+      case "pullRequestComment":
+        expect(receipt.resource).toMatchObject({
+          id: name === "pullRequests.reply" ? 2 : 1,
+          threadId: 1,
+          pullRequestId: 7,
+        });
+        break;
+      case "pullRequestReviewer":
+        expect(receipt.resource).toMatchObject({ id: viewer, pullRequestId: 7 });
+        break;
+    }
     expect(
       f.requests.slice(before).some((request) => request.method !== "GET"),
       name,
