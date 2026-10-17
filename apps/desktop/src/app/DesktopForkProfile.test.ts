@@ -15,12 +15,12 @@ const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) NodeFS.rmSync(root, { recursive: true, force: true });
 });
-function fixture() {
+function fixture(profileId = "update-proof") {
   const homeDirectory = NodeFS.realpathSync(
     NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fork-profile-")),
   );
   roots.push(homeDirectory);
-  const root = NodePath.join(homeDirectory, ".t3-desktop-isolated", "update-proof");
+  const root = NodePath.join(homeDirectory, ".t3-desktop-isolated", profileId);
   const app = NodePath.join(root, "Applications", `${FORK_NAME}.app`);
   const executablePath = NodePath.join(app, "Contents", "MacOS", FORK_NAME);
   NodeFS.mkdirSync(NodePath.dirname(executablePath), { recursive: true });
@@ -33,7 +33,7 @@ function fixture() {
     NodePath.join(root, "profile.json"),
     JSON.stringify({
       version: 1,
-      profileId: "update-proof",
+      profileId,
       bundleId: FORK_ID,
       appName: `${FORK_NAME}.app`,
     }),
@@ -65,12 +65,54 @@ it("resolves the same persistent proof profile after replacing the app without l
     expect(target.startsWith(`${input.root}/data/`)).toBe(true);
 });
 
+it.each(["a", "a".repeat(48)])(
+  "accepts a bound profile ID at the length limits: %s",
+  (profileId) => {
+    const profile = resolveDesktopForkProfile(fixture(profileId));
+    expect(profile.electronName).toBe(`T3 Code Azure Nightly Proof ${profileId}`);
+  },
+);
+
+it.each(["-invalid", "Uppercase", "under_score", "a".repeat(49)])(
+  "rejects an invalid profile ID even when the installation matches: %s",
+  (profileId) => {
+    const input = fixture(profileId);
+    expect(() => resolveDesktopForkProfile(input)).toThrow("Invalid fork profile binding");
+    expect(NodeFS.existsSync(NodePath.join(input.root, "data"))).toBe(false);
+  },
+);
+
 it("fails closed for missing, malformed and mismatched reserved bindings", () => {
   const input = fixture();
   const descriptor = NodePath.join(input.root, "profile.json");
   for (const value of [
     "{}",
     "not-json",
+    "null",
+    "[]",
+    "true",
+    "1",
+    '"binding"',
+    ...[
+      { version: "1" },
+      { version: 2 },
+      { profileId: null },
+      { profileId: 1 },
+      { profileId: "" },
+      { profileId: "Update-proof" },
+      { profileId: "../update-proof" },
+      { profileId: "a".repeat(49) },
+      { bundleId: "com.t3tools.t3code" },
+      { appName: "T3 Code.app" },
+    ].map((override) =>
+      JSON.stringify({
+        version: 1,
+        profileId: "update-proof",
+        bundleId: FORK_ID,
+        appName: `${FORK_NAME}.app`,
+        ...override,
+      }),
+    ),
     JSON.stringify({
       version: 1,
       profileId: "other",
@@ -80,9 +122,18 @@ it("fails closed for missing, malformed and mismatched reserved bindings", () =>
   ]) {
     NodeFS.writeFileSync(descriptor, value);
     expect(() => resolveDesktopForkProfile(input)).toThrow();
+    expect(NodeFS.existsSync(NodePath.join(input.root, "data"))).toBe(false);
   }
   NodeFS.rmSync(descriptor);
   expect(() => resolveDesktopForkProfile(input)).toThrow();
+});
+
+it("rejects an oversized binding before creating profile data", () => {
+  const input = fixture();
+  const descriptor = NodePath.join(input.root, "profile.json");
+  NodeFS.appendFileSync(descriptor, " ".repeat(4096));
+  expect(() => resolveDesktopForkProfile(input)).toThrow("too large");
+  expect(NodeFS.existsSync(NodePath.join(input.root, "data"))).toBe(false);
 });
 
 it("rejects an escaping data symlink before writing through it", () => {

@@ -2,6 +2,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 import * as NodeVM from "node:vm";
 import { build } from "vite-plus/pack";
 import { assert, it } from "vite-plus/test";
@@ -111,40 +112,71 @@ void import("./linux.ts").then(({ result }) => process.emit("ready", result));`,
 });
 
 it("loads the emitted packaged boot entry and backend cache preload", async () => {
-  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-desktop-boot-"));
+  const directory = await NodeFSP.realpath(
+    await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-desktop-boot-")),
+  );
   try {
-    const entries = ["src/boot.ts", "src/compileCache.ts", "src/profileBootstrap.ts"];
-    await NodeFSP.mkdir(NodePath.join(directory, "src"));
-    await Promise.all(
-      entries
-        .filter((entry) => entry !== "src/profileBootstrap.ts")
-        .map((entry) =>
-          NodeFSP.copyFile(
-            new URL(`../${entry}`, import.meta.url),
-            NodePath.join(directory, entry),
-          ),
-        ),
+    const entries = new Set(["src/boot.ts", "src/compileCache.ts", "src/profileBootstrap.ts"]);
+    const outputDirectory = NodePath.join(directory, "dist-electron");
+    const profileRoot = NodePath.join(directory, ".t3-desktop-isolated", "bundle-proof");
+    const application = NodePath.join(profileRoot, "Applications", "T3 Code (Azure Nightly).app");
+    const executable = NodePath.join(application, "Contents", "MacOS", "T3 Code (Azure Nightly)");
+    await NodeFSP.mkdir(NodePath.dirname(executable), { recursive: true });
+    await NodeFSP.writeFile(executable, "fixture");
+    await NodeFSP.writeFile(
+      NodePath.join(application, "Contents", "Info.plist"),
+      "<plist><dict><key>CFBundleIdentifier</key><string>com.jonathanm10.t3code.azure</string></dict></plist>",
     );
     await NodeFSP.writeFile(
-      NodePath.join(directory, "src/profileBootstrap.ts"),
-      'process.env.T3_FORK_BOOTSTRAPPED = "1";',
+      NodePath.join(profileRoot, "profile.json"),
+      JSON.stringify({
+        version: 1,
+        profileId: "bundle-proof",
+        bundleId: "com.jonathanm10.t3code.azure",
+        appName: "T3 Code (Azure Nightly).app",
+      }),
     );
     assert.ok(Array.isArray(desktopConfig.pack));
     for (const packConfig of desktopConfig.pack) {
       if (!Array.isArray(packConfig.entry)) continue;
-      if (!packConfig.entry.some((entry) => entries.includes(entry))) continue;
+      if (!packConfig.entry.some((entry) => entries.has(entry))) continue;
       await build({
         ...packConfig,
         config: false,
-        cwd: directory,
+        cwd: NodeURL.fileURLToPath(new URL("..", import.meta.url)),
+        outDir: outputDirectory,
         tsconfig: false,
         sourcemap: false,
         onSuccess: undefined,
         logLevel: "silent",
       });
     }
-    const outputDirectory = NodePath.join(directory, "dist-electron");
-    const fixture = `if (process.env.T3_FORK_BOOTSTRAPPED !== '1') throw new Error('Profile did not initialize first'); console.log(require('node:module').getCompileCacheDir() ? 'cached' : 'uncached');`;
+    const electronDirectory = NodePath.join(outputDirectory, "node_modules", "electron");
+    await NodeFSP.mkdir(electronDirectory, { recursive: true });
+    await NodeFSP.writeFile(
+      NodePath.join(electronDirectory, "index.js"),
+      `exports.app = {
+  isPackaged: true,
+  paths: {},
+  getVersion: () => "test",
+  setName(name) { this.name = name; },
+  setPath(name, target) { this.paths[name] = target; },
+  setAsDefaultProtocolClient: () => true,
+};`,
+    );
+    const fixture = `const assert = require("node:assert/strict");
+const { join } = require("node:path");
+const { app } = require("electron");
+const profileRoot = ${JSON.stringify(profileRoot)};
+assert.equal(app.name, "T3 Code Azure Nightly Proof bundle-proof");
+assert.equal(app.paths.userData, join(profileRoot, "data", "electron", "userData"));
+assert.equal(app.paths.sessionData, join(profileRoot, "data", "electron", "sessionData"));
+assert.equal(process.env.T3CODE_HOME, join(profileRoot, "data", "backend"));
+assert.equal(process.env.T3CODE_FORK_ISOLATED, "1");
+assert.equal(app.setAsDefaultProtocolClient("t3code-azure"), false);
+const diagnostic = require(join(profileRoot, "data", "backend", "desktop-profile.json"));
+assert.equal(diagnostic.safeStorageService, app.name + " Safe Storage");
+console.log(require("node:module").getCompileCacheDir() ? "cached" : "uncached");`;
     await NodeFSP.writeFile(NodePath.join(outputDirectory, "main.cjs"), fixture);
     await NodeFSP.writeFile(
       NodePath.join(outputDirectory, "backend.mjs"),
@@ -152,7 +184,10 @@ it("loads the emitted packaged boot entry and backend cache preload", async () =
     );
     for (const disabled of [false, true]) {
       for (const args of [
-        [NodePath.join(outputDirectory, "boot.cjs")],
+        [
+          "-e",
+          `process.execPath = ${JSON.stringify(executable)}; process.versions.electron = "44.4.5"; require(${JSON.stringify(NodePath.join(outputDirectory, "boot.cjs"))});`,
+        ],
         [
           "--require",
           NodePath.join(outputDirectory, "compileCache.cjs"),
@@ -160,10 +195,16 @@ it("loads the emitted packaged boot entry and backend cache preload", async () =
         ],
       ]) {
         const child = NodeChildProcess.spawnSync(process.execPath, args, {
+          cwd: directory,
           encoding: "utf8",
           env: {
             ...process.env,
+            HOME: directory,
+            USERPROFILE: directory,
+            T3CODE_HOME: NodePath.join(directory, "ambient-home"),
+            T3CODE_FORK_COMPILE_CACHE: NodePath.join(profileRoot, "data", "compile-cache"),
             APPIMAGE: "",
+            NODE_PATH: undefined,
             NODE_COMPILE_CACHE: undefined,
             NODE_DISABLE_COMPILE_CACHE: disabled ? "1" : undefined,
             XDG_CACHE_HOME: directory,

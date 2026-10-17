@@ -2,7 +2,6 @@
 import * as NodeFS from "node:fs";
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
-import * as Schema from "effect/Schema";
 import { assertReviewedDesktopElectronVersion } from "../../../../scripts/lib/desktop-electron-version.ts";
 
 export const FORK_ID = "com.jonathanm10.t3code.azure";
@@ -11,13 +10,37 @@ export const FORK_ELECTRON_NAME = "T3 Code Azure Nightly";
 export const FORK_SCHEME = "t3code-azure";
 export const RESERVED_PROFILE_DIRECTORY = ".t3-desktop-isolated";
 
-const ProfileBinding = Schema.Struct({
-  version: Schema.Literal(1),
-  profileId: Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,47}$/)),
-  bundleId: Schema.Literal(FORK_ID),
-  appName: Schema.Literal(`${FORK_NAME}.app`),
-});
-const decodeBinding = Schema.decodeUnknownSync(Schema.fromJsonString(ProfileBinding));
+interface ProfileBinding {
+  readonly version: 1;
+  readonly profileId: string;
+  readonly bundleId: typeof FORK_ID;
+  readonly appName: `${typeof FORK_NAME}.app`;
+}
+
+function decodeBinding(source: string): ProfileBinding {
+  const binding: unknown = JSON.parse(source);
+  if (
+    typeof binding !== "object" ||
+    binding === null ||
+    !("version" in binding) ||
+    binding.version !== 1 ||
+    !("profileId" in binding) ||
+    typeof binding.profileId !== "string" ||
+    !/^[a-z0-9][a-z0-9-]{0,47}$/.test(binding.profileId) ||
+    !("bundleId" in binding) ||
+    binding.bundleId !== FORK_ID ||
+    !("appName" in binding) ||
+    binding.appName !== `${FORK_NAME}.app`
+  ) {
+    throw new Error("Invalid fork profile binding.");
+  }
+  return {
+    version: binding.version,
+    profileId: binding.profileId,
+    bundleId: binding.bundleId,
+    appName: binding.appName,
+  };
+}
 
 export interface DesktopForkProfile {
   readonly kind: "normal" | "isolated";
