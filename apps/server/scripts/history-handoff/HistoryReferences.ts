@@ -263,7 +263,7 @@ function markdownPlan(markdown: string) {
       target: span ? { kind: "span", span } : { kind: "unsupported" },
     });
   });
-  const tree = callMethod(current, "runSync", [ast]);
+  const tree = callMethod(current, "runSync", [ast, { value: markdown }]);
   const references: Reference[] = [];
   const byNode = new WeakMap<object, Reference>();
   walk(tree, (node) => {

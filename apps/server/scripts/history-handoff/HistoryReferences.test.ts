@@ -250,11 +250,47 @@ it.each(["http://example.test", "https://example.test", "www.example.test"])(
   },
 );
 
-it("preserves email parsing through CRLF containers and over-indented list text", () => {
-  const text = `> person@example.test\r\n> ![image](${source})\r\n\r\n-      person@example.test [file](${source})`;
+it("preserves email parsing through CRLF containers", () => {
+  const text = `> person@example.test\r\n> ![image](${source})`;
   expect(historyReferences(text).paths).toEqual([source]);
   expect(rewriteMarkdownAssets(text, relocate).text).toBe(text.replace(source, destination));
   expect(historyReferences(`![next](${source})`).paths).toEqual([source]);
+});
+
+it.each(["![image]", "[file]"])("discovers and refuses recovered owned %s", (label) => {
+  const text = `-      person@example.test ${label}(/owned/a.png)`;
+  expect(historyReferences({ role: "assistant", text }).paths).toEqual(["/owned/a.png"]);
+  expect(rewriteMarkdownAssets(text, () => undefined)).toEqual({ text, changes: [] });
+  expect(() =>
+    rewriteMarkdownAssets(text, (path) => (path === "/owned/a.png" ? "/moved/a.png" : undefined)),
+  ).toThrow("unsupported-renderable-reference");
+});
+
+it("refuses a recovered image whose position matches an unrelated authored image", () => {
+  const text =
+    "x".repeat(45) + " ![image](/other/b.png)\n\n-      person@example.test ![image](/owned/a.png)";
+  expect(historyReferences(text).paths).toEqual(["/other/b.png", "/owned/a.png"]);
+  expect(() =>
+    rewriteMarkdownAssets(text, (path) => (path === "/owned/a.png" ? "/moved/a.png" : undefined)),
+  ).toThrow("changed-rendered-history");
+});
+
+it("refuses conflicting authored and recovered owned image spans", () => {
+  const text =
+    "x".repeat(45) + " ![image](/owned/b.png)\n\n-      person@example.test ![image](/owned/a.png)";
+  expect(() => rewriteMarkdownAssets(text, (path) => path.replace("/owned/", "/moved/"))).toThrow(
+    "conflicting-reference-spans",
+  );
+});
+
+it("uses the rendered definition scope of recovered list content", () => {
+  const externalDefinition = "-      ![image][a]\n\n[a]: /owned/a.png";
+  const recoveredDefinition = "-      ![image][a]\n\n      [a]: /owned/a.png";
+  expect(historyReferences(externalDefinition).paths).toEqual([]);
+  expect(historyReferences(recoveredDefinition).paths).toEqual(["/owned/a.png"]);
+  expect(() => rewriteMarkdownAssets(recoveredDefinition, () => "/moved/a.png")).toThrow(
+    "unsupported-renderable-reference",
+  );
 });
 
 it("preserves the rendered-history refusal for leading-BOM destination offsets", () => {
