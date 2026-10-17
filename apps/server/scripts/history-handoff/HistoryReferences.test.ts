@@ -215,6 +215,54 @@ const source = "/tmp/source/browser-artifacts/shot.png";
 const destination = "/tmp/longer-target/userdata/browser-artifacts/shot.png";
 const relocate = (path: string) => (path === source ? destination : undefined);
 
+it.each([
+  { name: "an unmatched bracket", prefix: "[", body: "a ".repeat(2048) },
+  { name: "H/W suffixes inside an atext run", prefix: "<", body: "1h_H_w_W".repeat(1024) },
+])("preserves owned references after $name and long non-email text", ({ prefix, body }) => {
+  const text = `person@example.test http://example.test www.example.test\n\n${prefix}${body}\n\n![image](${source})`;
+  expect(historyReferences(text).paths).toEqual([source]);
+  expect(rewriteMarkdownAssets(text, relocate)).toEqual({
+    text: text.replace(source, destination),
+    changes: [{ from: source, to: destination, offset: text.indexOf(source) }],
+  });
+});
+
+it("retains valid email local parts and nested image and anchor consumers", () => {
+  const text = `a+b_c.d-e@example.test [![image](${source})](${source}:12:7)\r\nuser&#64;example.test [file](${source})`;
+  const result = rewriteMarkdownAssets(text, relocate);
+  expect(result.text).toBe(text.replaceAll(source, destination));
+  expect(result.changes).toHaveLength(3);
+  expect(renderedConsumers(result.text).map((ref) => ref.path)).toEqual([
+    null,
+    destination,
+    destination,
+    null,
+    destination,
+  ]);
+});
+
+it.each(["http://example.test", "https://example.test", "www.example.test"])(
+  "retains references exposed by %s consuming a code delimiter",
+  (external) => {
+    const text = `${external}/\` ![image](${source}) [file](${source}) \``;
+    expect(historyReferences(text).paths).toEqual([source]);
+    expect(rewriteMarkdownAssets(text, relocate).text).toBe(text.replaceAll(source, destination));
+  },
+);
+
+it("preserves email parsing through CRLF containers and over-indented list text", () => {
+  const text = `> person@example.test\r\n> ![image](${source})\r\n\r\n-      person@example.test [file](${source})`;
+  expect(historyReferences(text).paths).toEqual([source]);
+  expect(rewriteMarkdownAssets(text, relocate).text).toBe(text.replace(source, destination));
+  expect(historyReferences(`![next](${source})`).paths).toEqual([source]);
+});
+
+it("preserves the rendered-history refusal for leading-BOM destination offsets", () => {
+  const text = `\ufeffperson@example.test [file](${source})`;
+  expect(historyReferences(text).paths).toEqual([source]);
+  expect(() => rewriteMarkdownAssets(text, relocate)).toThrow("changed-rendered-history");
+});
+
 it("preserves UTF-16 text, CRLF, angle destinations and misleading titles with source-ordered evidence", () => {
   const text = `😀 prefix\r\n[![thumb](<${source}> "title ](/tmp/decoy.png)")](${source} 'outer')\r\n![last](${source})`;
   const expected = `😀 prefix\r\n[![thumb](<${destination}> "title ](/tmp/decoy.png)")](${destination} 'outer')\r\n![last](${destination})`;

@@ -58,6 +58,80 @@ const isJsonObject = Schema.is(Schema.Record(Schema.String, Schema.Json));
 const decodeJson = Schema.decodeUnknownSync(Schema.Json);
 const decodeAttachment = Schema.decodeUnknownSync(ChatAttachment);
 
+type MarkdownState = (code: number | null) => unknown;
+type MarkdownEffects = {
+  enter(type: "data"): void;
+  exit(type: "data"): void;
+  consume(code: number): void;
+  check(construct: unknown, ok: MarkdownState, nok: MarkdownState): MarkdownState;
+};
+
+const emailPrefix = {
+  partial: true,
+  tokenize(effects: MarkdownEffects, ok: MarkdownState, nok: MarkdownState) {
+    let present = false;
+    return scan;
+    function scan(code: number | null): unknown {
+      if (
+        code !== null &&
+        (code === 43 ||
+          code === 45 ||
+          code === 46 ||
+          code === 95 ||
+          (code >= 48 && code <= 57) ||
+          (code >= 65 && code <= 90) ||
+          (code >= 97 && code <= 122))
+      ) {
+        if (!present) effects.enter("data");
+        present = true;
+        effects.consume(code);
+        return scan;
+      }
+      if (present) effects.exit("data");
+      return present && code === 64 ? ok(code) : nok(code);
+    }
+  },
+};
+
+function guardImpossibleEmailStarts(this: { data(): { micromarkExtensions: unknown[] } }) {
+  function clone(construct: unknown): unknown {
+    if (Array.isArray(construct)) return construct.map(clone);
+    if (!Predicate.isObject(construct) || construct.name !== "emailAutolink") return construct;
+    const { tokenize, previous } = construct;
+    if (typeof tokenize !== "function" || typeof previous !== "function")
+      throw new Error("Unavailable Markdown email tokenizer");
+    const originalTokenize = tokenize;
+    return {
+      ...construct,
+      tokenize(
+        this: { previous: number | null },
+        effects: MarkdownEffects,
+        ok: MarkdownState,
+        nok: MarkdownState,
+      ) {
+        if (!previous.call(this, this.previous)) return nok;
+        const delegate: MarkdownState = (code) => {
+          const start: unknown = originalTokenize.call(this, effects, ok, nok);
+          if (typeof start !== "function") throw new Error("Unavailable Markdown email state");
+          return start(code);
+        };
+        return effects.check(emailPrefix, delegate, nok);
+      },
+    };
+  }
+  const data = this.data();
+  data.micromarkExtensions = data.micromarkExtensions.map((extension) =>
+    !Predicate.isObject(extension) || !Predicate.isObject(extension.text)
+      ? extension
+      : {
+          ...extension,
+          text: Object.fromEntries(
+            Object.entries(extension.text).map(([code, constructs]) => [code, clone(constructs)]),
+          ),
+        },
+  );
+}
+
 function visibleFields(value: Schema.Json) {
   if (!isJsonObject(value)) return undefined;
   if (typeof value.role === "string" && typeof value.text === "string")
@@ -160,7 +234,8 @@ function markdownPlan(markdown: string) {
       },
     });
   }
-  const current = callMethod(callMethod(renderer, "copy", []), "use", [captureDestinations]);
+  const current = callMethod(callMethod(renderer, "copy", []), "use", [guardImpossibleEmailStarts]);
+  callMethod(current, "use", [captureDestinations]);
   const ast = callMethod(current, "parse", [markdown]);
   const definitions = new Map<string, object>();
   const sources = new Map<string, { context: Context; target: Target }>();
