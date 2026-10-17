@@ -443,10 +443,14 @@ function startPausedCopy(
       input.operationDirectory,
       checkpoint,
     ],
-    { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+    { detached: true, stdio: ["ignore", "pipe", "pipe", "pipe"] },
   );
   const pid = child.pid;
   if (pid === undefined) throw new Error("No captured child PID");
+  const { stdout: output, stderr: errors } = child;
+  const release = child.stdio[3];
+  if (!output || !errors || !release || !("end" in release))
+    throw new Error("Missing fixture pipes");
   process.stdout.write(`Captured fixture PID/PGID ${pid}/${pid} at launch.\n`);
   let stdout = "";
   let stderr = "";
@@ -455,14 +459,14 @@ function startPausedCopy(
     child.once("close", (code, signal) => resolve({ code, signal })),
   );
   const barrier = new Promise<void>((resolve, reject) => {
-    child.stdout.on("data", (bytes) => {
+    output.on("data", (bytes) => {
       stdout += String(bytes);
       if (!reached && stdout.includes(`HISTORY_BARRIER ${checkpoint}\n`)) {
         reached = true;
         resolve();
       }
     });
-    child.stderr.on("data", (bytes) => {
+    errors.on("data", (bytes) => {
       stderr += String(bytes);
     });
     child.once("error", reject);
@@ -474,6 +478,7 @@ function startPausedCopy(
     pid,
     barrier,
     exit,
+    release: () => release.end("C"),
     output: () => stdout,
     async stop() {
       try {
@@ -523,6 +528,20 @@ function startPausedCopy(
   };
 }
 
+it.effect("retains a fixture release sent before reaching the read-cut barrier", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture();
+    const child = yield* Effect.acquireRelease(
+      Effect.sync(() => startPausedCopy(f, "read-cut")),
+      (child) => Effect.promise(() => child.stop()),
+    );
+    child.release();
+    yield* Effect.promise(() => child.barrier);
+    expect(yield* Effect.promise(() => child.exit)).toEqual({ code: 0, signal: null });
+    expect(child.output()).toContain('"kind":"installed"');
+  }),
+);
+
 it.effect("holds one real WAL read cut while another connection commits", () =>
   Effect.gen(function* () {
     const f = yield* fixture();
@@ -532,7 +551,7 @@ it.effect("holds one real WAL read cut while another connection commits", () =>
     );
     yield* Effect.promise(() => child.barrier);
     f.database.exec("UPDATE mcp_app_model_context SET text='committed-after-read-cut'");
-    process.kill(child.pid, "SIGCONT");
+    child.release();
     expect(yield* Effect.promise(() => child.exit)).toEqual({ code: 0, signal: null });
     expect(child.output()).toContain('"kind":"installed"');
     const target = new NodeSqlite.DatabaseSync(
@@ -606,7 +625,7 @@ it.effect("refuses a target created immediately before the native no-replace ren
       await NodeFSP.mkdir(f.targetHome);
       await NodeFSP.writeFile(NodePath.join(f.targetHome, "unrelated"), "preserve this");
     });
-    process.kill(child.pid, "SIGCONT");
+    child.release();
     yield* Effect.promise(() => child.exit);
     expect(child.output()).toContain('"reason":"no-replace-publication-refused"');
     expect(
@@ -844,8 +863,8 @@ it.effect.each(["late", "changed", "symlink", "fifo"] as const)(
             kind === "late" ? png : Buffer.concat([png, Buffer.from("changed")]),
           ),
         );
-        process.kill(child.pid, "SIGCONT");
-        yield* Effect.promise(() => child.exit);
+        child.release();
+        expect(yield* Effect.promise(() => child.exit)).toEqual({ code: 0, signal: null });
         expect(child.output()).toContain('"kind":"refused"');
         expect(child.output()).toContain(
           kind === "late" ? "required-asset-missing-unsafe-or-late" : "changed-before-copy",
@@ -1080,7 +1099,7 @@ it.effect.each([false, true])(
       );
       expect("frozenAt" in claimed).toBe(false);
       if (interrupted) process.kill(-child.pid, "SIGKILL");
-      else process.kill(child.pid, "SIGCONT");
+      else child.release();
       yield* Effect.promise(() => child.exit);
       const result = yield* copyHistory(f);
       expect(result.kind).toBe(interrupted ? "installed" : "already-installed");

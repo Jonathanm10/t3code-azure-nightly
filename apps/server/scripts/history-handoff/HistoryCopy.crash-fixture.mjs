@@ -17,7 +17,9 @@ if (
   throw new Error("Not an owned synthetic fixture");
 const stop = (point) => {
   NodeFS.writeSync(1, `HISTORY_BARRIER ${point}\n`);
-  process.kill(process.pid, "SIGSTOP");
+  const release = Buffer.alloc(1);
+  if (NodeFS.readSync(3, release, 0, 1, null) !== 1 || release.toString() !== "C")
+    throw new Error("Missing or invalid fixture release");
 };
 const originalRename = NodeFS.promises.rename;
 NodeFS.promises.rename = async (from, to) => {
