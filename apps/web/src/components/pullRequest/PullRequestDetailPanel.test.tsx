@@ -6,8 +6,9 @@ import {
   type ScopedThreadRef,
   type PullRequestDetailView,
   type ThreadPullRequestLink,
+  type AzureDevOpsServerProfile,
 } from "@t3tools/contracts";
-import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
+import { DEFAULT_CLIENT_SETTINGS, DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts/settings";
 import { act, type ReactNode, type ReactElement, type ComponentProps } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -32,7 +33,22 @@ vi.mock("~/state/session", async (original) => ({
 }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => [] }));
 vi.mock("~/state/server", () => ({ primaryServerKeybindingsAtom: {} }));
-vi.mock("~/state/entities", () => ({ useProjects: () => [], useServerConfigs: () => new Map() }));
+vi.mock("~/state/entities", () => ({
+  useProjects: () => projects,
+  useServerConfigs: () =>
+    new Map([
+      [
+        EnvironmentId.make("env-1"),
+        {
+          settings: {
+            ...DEFAULT_SERVER_SETTINGS,
+            sourceControlHosts: { "azure-devops-server": { profiles } },
+          },
+          environment: { capabilities: { pullRequests: true, threadPullRequests: true } },
+        },
+      ],
+    ]),
+}));
 vi.mock("~/state/environments", () => ({
   useEnvironments: () => ({ environments: [] }),
   usePrimaryEnvironmentId: () => EnvironmentId.make("env-1"),
@@ -58,13 +74,13 @@ vi.mock("~/state/pullRequests", async (importOriginal) => ({
     generateReviewGuide: { permissionAtom: () => "generate-review-guide" },
   },
   usePullRequestTurnRefresh: () => 0,
-  useSharedPullRequestSummary: () => null,
+  useSharedPullRequestSummary: () => summary,
 }));
 vi.mock("~/state/vcs", () => ({ vcsEnvironment: { listRefs: () => null } }));
 vi.mock("~/state/query", () => ({
   useEnvironmentQuery: (query: string) => ({
-    data: query === "detail" ? detail : null,
-    isPending: false,
+    data: query === "detail" ? currentDetail : null,
+    isPending: query === "detail" && currentDetail === null,
     isSuccess: true,
     error: null,
     refresh,
@@ -217,6 +233,11 @@ const detail: PullRequestDetailView = {
   },
 };
 
+let currentDetail: PullRequestDetailView | null = detail;
+let summary: PullRequestDetailView | null = null;
+let profiles: ReadonlyArray<AzureDevOpsServerProfile> = [];
+let projects: ReadonlyArray<import("@t3tools/client-runtime/state/shell").EnvironmentProject> = [];
+
 const threadRef: ScopedThreadRef = {
   environmentId: EnvironmentId.make("env-1"),
   threadId: ThreadId.make("thread-1"),
@@ -226,6 +247,10 @@ const newDraftId = DraftId.make("new-draft");
 let renderer: ReactTestRenderer;
 
 beforeEach(() => {
+  currentDetail = detail;
+  summary = null;
+  profiles = [];
+  projects = [];
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
   useComposerDraftStore.setState({ draftsByThreadKey: {} });
@@ -432,4 +457,160 @@ it("changes the title only for the active tab's main scroller", async () => {
   code.scrollTop = 0;
   await act(async () => mainScroll.props.onScrollCapture({ target: code }));
   expect(titleFold().props.inert).toBe(false);
+});
+
+describe("configured Azure Server read-only panel", () => {
+  const serverDetail: PullRequestDetailView = {
+    ...detail,
+    provider: SourceControlProviderKind.make("azure-devops"),
+    repository: "Repo",
+    url: "https://web.example.test/tfs/C/P/_git/Repo/pullrequest/1",
+  };
+  function render(target?: typeof draftId, pullRequest = serverDetail) {
+    renderer = create(
+      <PullRequestDetailPanel
+        environmentId={threadRef.environmentId}
+        reference={{
+          ...pullRequest,
+          host: projects[0]?.repositoryIdentity?.canonicalKey.split("/")[0],
+        }}
+        context="page"
+        shortcutsEnabled={false}
+        getShortcutContext={() => ({
+          terminalFocus: false,
+          terminalOpen: false,
+          previewFocus: false,
+          previewOpen: false,
+          isWeb: true,
+          isDesktop: false,
+        })}
+        {...(target ? { composerDraftTarget: target } : {})}
+      />,
+    );
+  }
+  beforeEach(() => {
+    profiles = [
+      {
+        apiCollectionUrl: "https://git.example.test:8443/tfs/C",
+        browserCollectionUrl: "https://web.example.test/tfs/C",
+      },
+    ];
+    currentDetail = serverDetail;
+    projects = [
+      {
+        environmentId: threadRef.environmentId,
+        id: detail.projectId,
+        title: "Repo",
+        workspaceRoot: "/workspace",
+        repositoryIdentity: {
+          provider: SourceControlProviderKind.make("azure-devops"),
+          canonicalKey: "git.example.test:8443/tfs/c/p/_git/repo",
+          name: "Repo",
+          locator: {
+            source: "git-remote",
+            remoteName: "origin",
+            remoteUrl: "https://git.example.test:8443/tfs/C/P/_git/Repo",
+          },
+        },
+        defaultModelSelection: null,
+        scripts: [],
+        createdAt: detail.createdAt,
+        updatedAt: detail.updatedAt,
+      },
+    ];
+  });
+
+  it.each(["loaded", "loading summary", "loading identity"])(
+    "does not offer checkout for %s",
+    async (state) => {
+      if (state !== "loaded") currentDetail = null;
+      if (state === "loading summary") summary = serverDetail;
+      await act(async () => render());
+      expect(
+        renderer.root
+          .findAllByType("button")
+          .filter((node) => node.props["aria-label"] === "Check out"),
+      ).toHaveLength(0);
+      const strings = renderer.root
+        .findAll((node) => typeof node.type === "string")
+        .flatMap((node) => node.children.filter((child) => typeof child === "string"));
+      expect(strings.some((text) => text.includes("az repos pr checkout"))).toBe(false);
+    },
+  );
+
+  it.each(["loaded", "loading summary", "loading identity"])(
+    "preserves Cloud checkout for %s",
+    async (state) => {
+      const cloudDetail = {
+        ...serverDetail,
+        url: "https://dev.azure.com/Org/P/_git/Repo/pullrequest/1",
+      };
+      currentDetail = state === "loaded" ? cloudDetail : null;
+      summary = state === "loading summary" ? cloudDetail : null;
+      projects = projects.map((project) => ({
+        ...project,
+        repositoryIdentity: {
+          provider: SourceControlProviderKind.make("azure-devops"),
+          canonicalKey: "dev.azure.com/org/p/_git/repo",
+          name: "Repo",
+          locator: {
+            source: "git-remote",
+            remoteName: "origin",
+            remoteUrl: "https://dev.azure.com/Org/P/_git/Repo",
+          },
+        },
+      }));
+      await act(async () => render(undefined, cloudDetail));
+      expect(
+        renderer.root
+          .findAllByType("button")
+          .filter((node) => node.props["aria-label"] === "Check out"),
+      ).toHaveLength(state === "loading identity" ? 0 : 1);
+      const strings = renderer.root
+        .findAll((node) => typeof node.type === "string")
+        .flatMap((node) => node.children.filter((child) => typeof child === "string"));
+      expect(strings.some((text) => text.includes("az repos pr checkout --id 1"))).toBe(true);
+    },
+  );
+
+  it("does not offer checkout-dependent tasks on the standalone page", async () => {
+    await act(async () => render());
+    expect(
+      renderer.root
+        .findAllByType("button")
+        .filter((node) => node.props["aria-label"] === "Resolve conflicts"),
+    ).toHaveLength(0);
+    expect(
+      renderer.root
+        .findAllByType("button")
+        .filter((node) => node.children.includes("Fix findings in a thread")),
+    ).toHaveLength(0);
+    expect(prepareThread).not.toHaveBeenCalled();
+  });
+
+  it.each(["Ask a question", "Explain this PR", "Add to agent"])(
+    "keeps %s available without checkout",
+    async (action) => {
+      await act(async () => render());
+      if (action === "Add to agent") await click("Code");
+      await click(action);
+      expect(
+        useComposerDraftStore.getState().getComposerDraft(newDraftId)?.reviewComments?.length,
+      ).toBeGreaterThan(0);
+      expect(prepareThread).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["Resolve conflicts", "Fix findings in this thread", "Fix check"])(
+    "keeps %s for an existing composer",
+    async (action) => {
+      await act(async () => render(draftId));
+      await click(action);
+      expect(useComposerDraftStore.getState().getComposerDraft(draftId)?.prompt).toMatch(
+        /resolve every conflict|Fix the actionable findings|Fix the failing check/,
+      );
+      expect(newThread).not.toHaveBeenCalled();
+      expect(prepareThread).not.toHaveBeenCalled();
+    },
+  );
 });

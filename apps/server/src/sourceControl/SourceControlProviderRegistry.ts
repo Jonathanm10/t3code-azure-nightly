@@ -1,3 +1,4 @@
+import { azureDevOpsServerProfiles } from "@t3tools/shared/azureDevOps";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
@@ -259,19 +260,37 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
       Effect.forkScoped,
     );
 
-    const refineContext = (
+    const refineContext = Effect.fnUntraced(function* (
       cwd: string,
       context: SourceControlProvider.SourceControlProviderContext | null,
-    ): Effect.Effect<SourceControlProvider.SourceControlProviderContext | null> =>
-      context === null || context.provider.kind !== "unknown"
-        ? Effect.succeed(context)
-        : Cache.get(
-            unknownRemoteCache,
-            new UnknownRemoteLookup(
-              context,
-              refineUnknownRemoteProvider({ specs: discoverySpecs, process, cwd, context }),
-            ),
-          ).pipe(Effect.map(({ provider }) => (provider ? { ...context, provider } : context)));
+    ) {
+      if (context === null) return null;
+      const profiles = azureDevOpsServerProfiles(
+        yield* serverSettings.getSettings.pipe(
+          Effect.orElseSucceed(() => ({ sourceControlHosts: {} })),
+        ),
+      );
+      const configured = detectSourceControlProviderFromRemoteUrl(context.remoteUrl, profiles);
+      if (configured?.kind === "azure-devops-server") return { ...context, provider: configured };
+      if (context.provider.kind === "azure-devops-server") {
+        return {
+          ...context,
+          provider: configured ?? {
+            ...context.provider,
+            kind: SourceControlProviderKind.make("unknown"),
+          },
+        };
+      }
+      if (context.provider.kind !== "unknown") return context;
+      const result = yield* Cache.get(
+        unknownRemoteCache,
+        new UnknownRemoteLookup(
+          context,
+          refineUnknownRemoteProvider({ specs: discoverySpecs, process, cwd, context }),
+        ),
+      );
+      return result.provider ? { ...context, provider: result.provider } : context;
+    });
 
     const detectProviderContext = Effect.fn("SourceControlProviderRegistry.detectProviderContext")(
       function* (cwd: string) {
@@ -299,7 +318,7 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
               }),
           ),
         );
-        return yield* refineContext(cwd, selectProviderContext(remotes.remotes));
+        return selectProviderContext(remotes.remotes);
       },
     );
 
@@ -315,8 +334,9 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
     const resolveHandle: SourceControlProviderRegistry["Service"]["resolveHandle"] = (input) =>
       (input.context === undefined
         ? Cache.get(providerContextCache, input.cwd)
-        : refineContext(input.cwd, input.context)
+        : Effect.succeed(input.context)
       ).pipe(
+        Effect.flatMap((context) => refineContext(input.cwd, context)),
         Effect.map((context) => {
           const kind = context?.provider.kind ?? SourceControlProviderKind.make("unknown");
           const provider = providers.get(kind) ?? unsupportedProvider(kind);

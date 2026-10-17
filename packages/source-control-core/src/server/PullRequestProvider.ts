@@ -244,7 +244,7 @@ export interface ProviderRepositoryRef {
 
 export interface PullRequestProviderApi {
   readonly withVerifiedCredential?: <A, E, R>(
-    input: { readonly cwd: string; readonly host: string },
+    input: { readonly cwd: string; readonly host: string; readonly remoteUrl?: string },
     use: (identity: {
       readonly accountId: string;
       readonly viewer: string;

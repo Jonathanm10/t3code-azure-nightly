@@ -1,3 +1,5 @@
+import { azureDevOpsServerProfiles } from "@t3tools/shared/azureDevOps";
+import { resolveAzureDevOpsServerAddress } from "@t3tools/shared/azureDevOps";
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import { useAtomValue } from "@effect/atom-react";
 import { usePullRequestStack } from "~/state/usePullRequestStack";
@@ -766,15 +768,24 @@ export function PullRequestDetailPanel({
     detail?.author && repositoryUrl !== null
       ? hostClient.authorProfileUrl(detail.author.login, repositoryUrl)
       : null;
-  const checkoutCommand = handoffSummary
-    ? pullRequestCheckoutCommand(
-        handoffSummary.provider,
-        handoffSummary.number,
-        handoffSummary.headBranch,
-        detail?.headRepositoryNameWithOwner,
-        changeRequestRepositoryUrl(handoffSummary.url),
-      )
-    : loadingPullRequestCheckoutCommand(reference, repositoryIdentity);
+  const supportsCheckout =
+    resolveAzureDevOpsServerAddress(
+      handoffSummary?.url ?? repositoryIdentity?.locator.remoteUrl ?? "",
+      azureDevOpsServerProfiles(
+        environmentConfigs.get(environmentId)?.settings ?? { sourceControlHosts: {} },
+      ),
+    ) === null;
+  const checkoutCommand = !supportsCheckout
+    ? null
+    : handoffSummary
+      ? pullRequestCheckoutCommand(
+          handoffSummary.provider,
+          handoffSummary.number,
+          handoffSummary.headBranch,
+          detail?.headRepositoryNameWithOwner,
+          changeRequestRepositoryUrl(handoffSummary.url),
+        )
+      : loadingPullRequestCheckoutCommand(reference, repositoryIdentity);
   const branchRefsQuery = useEnvironmentQuery(
     detail === null
       ? null
@@ -1034,6 +1045,7 @@ export function PullRequestDetailPanel({
     void guideWriter.write();
     if (guideWriter.data?.guide == null) setTab("guide");
   };
+  const supportsTaskHandoff = attachTarget !== null || supportsCheckout;
 
   const writeTaskToComposer = (target: ScopedThreadRef | DraftId, task: ThreadTask) => {
     const store = useComposerDraftStore.getState();
@@ -1160,7 +1172,7 @@ export function PullRequestDetailPanel({
       });
       return;
     }
-    if (checkoutRoot === null) return;
+    if (!supportsCheckout || checkoutRoot === null) return;
     if (
       !prepareThread.isAllowed ||
       !readEnvironmentScope(actingEnvironmentId, AuthSourceControlWriteScope)
@@ -1519,7 +1531,7 @@ export function PullRequestDetailPanel({
       : 0;
 
   const checkoutControl =
-    context === "page" ? (
+    context === "page" && supportsCheckout ? (
       <Menu>
         <Tooltip>
           <TooltipTrigger
@@ -1575,7 +1587,7 @@ export function PullRequestDetailPanel({
       </Menu>
     ) : null;
 
-  const resolveConflictsControl = (
+  const resolveConflictsControl = supportsTaskHandoff ? (
     <Tooltip>
       <TooltipTrigger
         render={
@@ -1599,7 +1611,7 @@ export function PullRequestDetailPanel({
         {handoff === "conflicts" ? "Preparing..." : "Resolve conflicts"}
       </TooltipPopup>
     </Tooltip>
-  );
+  ) : null;
 
   if (detailQuery.isPending && !detail) {
     return (
@@ -2081,13 +2093,15 @@ export function PullRequestDetailPanel({
                       </span>
                     </span>
                   </MenuItem>
-                  <MenuItem
-                    disabled={handoff !== null || !canFixFindings}
-                    onClick={startFixFindings}
-                  >
-                    <HammerIcon className="size-3.5" />
-                    {handoff === "findings" ? "Preparing..." : handoffLabels.fixFindings}
-                  </MenuItem>
+                  {supportsTaskHandoff ? (
+                    <MenuItem
+                      disabled={handoff !== null || !canFixFindings}
+                      onClick={startFixFindings}
+                    >
+                      <HammerIcon className="size-3.5" />
+                      {handoff === "findings" ? "Preparing..." : handoffLabels.fixFindings}
+                    </MenuItem>
+                  ) : null}
                   {reviewGuidesEnabled && guideWriter.canWrite ? (
                     <MenuItem disabled={guideWriter.running} onClick={writeGuide}>
                       <SparklesIcon className="size-3.5" />
@@ -2788,7 +2802,9 @@ export function PullRequestDetailPanel({
                   pendingFinding={handoff}
                   fixFindingLabel={handoffLabels.fixFinding}
                   fixCheckLabel={handoffLabels.fixCheck}
-                  {...(canFixFindings ? { onFixFinding: startFixFinding } : {})}
+                  {...(canFixFindings && supportsTaskHandoff
+                    ? { onFixFinding: startFixFinding }
+                    : {})}
                   onRefresh={refreshDetail}
                   onRefreshChecks={refreshFromHost}
                 />
@@ -2857,7 +2873,9 @@ export function PullRequestDetailPanel({
                     onSelectedCommitChange={selectCodeCommit}
                     pendingFinding={handoff}
                     fixFindingLabel={handoffLabels.fixFinding}
-                    {...(canFixFindings ? { onFixFinding: startFixFinding } : {})}
+                    {...(canFixFindings && supportsTaskHandoff
+                      ? { onFixFinding: startFixFinding }
+                      : {})}
                     onRefresh={refreshDetail}
                     refreshToken={codeRefreshToken}
                     revealRequest={codeRevealRequest}

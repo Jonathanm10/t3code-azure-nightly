@@ -1,3 +1,4 @@
+import { changeRequestUrlFor } from "@t3tools/shared/changeRequestUrl";
 import { describe, expect, it } from "vite-plus/test";
 
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
@@ -14,6 +15,50 @@ const project = {
 };
 
 describe("resolveLinkPullRequestInput", () => {
+  it("resolves Server bare numbers and browser aliases to the configured native identity", () => {
+    const profiles = [
+      {
+        apiCollectionUrl: "https://git.example.test/tfs/C",
+        browserCollectionUrl: "https://web.example.test/C",
+      },
+    ];
+    const remote = "https://git.example.test/tfs/C/P/_git/Web";
+    const own = {
+      host: "git.example.test",
+      repository: "tfs/c/p/_git/web",
+      webUrl: (number: number) =>
+        changeRequestUrlFor(
+          "azure-devops-server",
+          "git.example.test",
+          "tfs/c/p/_git/web",
+          number,
+          remote,
+          profiles,
+        ),
+    };
+    const bare = resolveLinkPullRequestInput({
+      reference: "#42",
+      project: own,
+      profiles,
+      hasProject: () => true,
+    });
+    const alias = resolveLinkPullRequestInput({
+      reference: "https://web.example.test/C/P/_git/Web/pullrequest/42",
+      project: null,
+      profiles,
+      hasProject: () => true,
+    });
+    const expected = {
+      link: {
+        host: "git.example.test",
+        repository: "tfs/c/p/_git/web",
+        number: 42,
+        url: "https://web.example.test/C/P/_git/Web/pullrequest/42",
+      },
+    };
+    expect(bare).toMatchObject(expected);
+    expect(alias).toMatchObject(expected);
+  });
   it.each([
     ["https://bitbucket.org/acme/web/pull-requests/42", "bitbucket.org"],
     ["https://github.acme.test/acme/web/pull/42", "github.acme.test"],

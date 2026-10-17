@@ -12,6 +12,7 @@ import { MiddleTruncate } from "../ui/middle-truncate";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   PullRequestActorAvatar,
+  pullRequestActorPresentation,
   PullRequestConflictGlyph,
   PullRequestStateGlyph,
 } from "./pullRequestPresentation";
@@ -113,18 +114,16 @@ export function PullRequestRowAuthor({
   className?: string;
   labelClassName?: string;
 }) {
-  const login = actor?.login ?? "ghost";
+  const presentation = pullRequestActorPresentation(actor);
   return (
     <Tooltip>
       <TooltipTrigger
         render={<span className={cn("inline-flex min-w-0 items-center gap-1", className)} />}
       >
         <PullRequestActorAvatar actor={actor} className="size-3.5" />
-        <span className={cn("truncate", labelClassName)}>{login}</span>
+        <span className={cn("truncate", labelClassName)}>{presentation.label}</span>
       </TooltipTrigger>
-      <TooltipPopup side="top">
-        {actor?.name && actor.name !== login ? `${actor.name} (@${login})` : login}
-      </TooltipPopup>
+      <TooltipPopup side="top">{presentation.tooltip}</TooltipPopup>
     </Tooltip>
   );
 }

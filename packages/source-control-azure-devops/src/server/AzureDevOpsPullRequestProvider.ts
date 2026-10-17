@@ -1,9 +1,11 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import type { PullRequestCapabilities, PullRequestViewerPermissions } from "@t3tools/contracts";
 
 import * as AzureDevOpsPullRequestCli from "./AzureDevOpsPullRequestCli.ts";
+import { AzureDevOpsServerApi } from "./AzureDevOpsServerApi.ts";
 import {
   azureDevOpsFilePatch,
   azureDevOpsUnreadableFilePatch,
@@ -40,6 +42,7 @@ import { definition } from "../client/definition.ts";
  * one after another is most of what the Code tab waits for.
  */
 const DIFF_FILE_CONCURRENCY = 4;
+const isProviderError = Schema.is(PullRequestProviderError);
 
 /**
  * How many `az` processes this build will have out at once, counted across every reader rather than
@@ -83,6 +86,22 @@ const AZURE_DEVOPS_VIEWER_PERMISSIONS: PullRequestViewerPermissions = {
   requestReviewers: CAPABILITIES.reviewers.request,
 };
 
+const SERVER_CAPABILITIES: PullRequestCapabilities = {
+  ...CAPABILITIES,
+  actions: [],
+  mergeMethods: [],
+  reviewers: { request: false, listCandidates: false },
+  edit: { changeRequest: false, comment: false },
+};
+const SERVER_PERMISSIONS: PullRequestViewerPermissions = {
+  actions: [],
+  comment: false,
+  resolve: false,
+  verdicts: [],
+  requestReviewers: false,
+};
+
+/** The CLI tags that mean the tool itself is unusable, rather than one request failing. */
 export function azureDevOpsProviderFailure(
   error: AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCliError,
 ): PullRequestProviderFailure {
@@ -90,6 +109,11 @@ export function azureDevOpsProviderFailure(
   if (error._tag === "AzureDevOpsCliAuthenticationError") return { reason: "unauthenticated" };
   if (error._tag === "AzureDevOpsCliRateLimitError") return { reason: "rate-limited" };
   if (error._tag === "AzureDevOpsPullRequestNotFoundError") return { reason: "not-found" };
+  if (
+    error._tag === "AzureDevOpsServerReadError" &&
+    (error.category === "authentication" || error.category === "credential-persistence")
+  )
+    return { reason: "unauthenticated" };
   return { reason: "failed" };
 }
 
@@ -118,8 +142,15 @@ function toChangeRequest(pullRequest: AzureDevOpsPullRequest): ProviderChangeReq
   };
 }
 
-export const make = Effect.gen(function* () {
-  const cli = yield* AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli;
+export const makeWithReader = Effect.fnUntraced(function* (
+  cli: AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli["Service"],
+  server?: AzureDevOpsServerApi["Service"],
+) {
+  const kind = SourceControlProviderKind.make(
+    server === undefined ? "azure-devops" : "azure-devops-server",
+  );
+  const capabilities = server === undefined ? CAPABILITIES : SERVER_CAPABILITIES;
+  const permissions = server === undefined ? AZURE_DEVOPS_VIEWER_PERMISSIONS : SERVER_PERMISSIONS;
   const diffSpawns = yield* Semaphore.make(MAX_DIFF_SPAWNS);
   const readItemContent = (input: Parameters<typeof cli.readItemContent>[0]) =>
     diffSpawns.withPermits(1)(cli.readItemContent(input));
@@ -127,20 +158,26 @@ export const make = Effect.gen(function* () {
   const fail =
     (operation: string) => (error: AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCliError) =>
       new PullRequestProviderError({
-        provider: SourceControlProviderKind.make("azure-devops"),
+        provider: kind,
         operation,
         ...azureDevOpsProviderFailure(error),
         detail: error.detail,
+        ...(error._tag === "AzureDevOpsServerReadError" && error.retryAt !== undefined
+          ? { retryAt: error.retryAt }
+          : {}),
         cause: error,
       });
 
   const unsupported = (operation: string) =>
     Effect.fail(
       new PullRequestProviderError({
-        provider: SourceControlProviderKind.make("azure-devops"),
+        provider: kind,
         operation,
         reason: "failed",
-        detail: "Azure DevOps reviews cannot be written from here yet.",
+        detail:
+          server === undefined
+            ? "Azure DevOps reviews cannot be written from here yet."
+            : "Azure DevOps Server is read-only in T3. This operation is unavailable.",
       }),
     );
 
@@ -154,27 +191,29 @@ export const make = Effect.gen(function* () {
    */
   const locations = new Map<string, AzureDevOpsRepositoryLocation>();
 
-  const locationOf = (input: { readonly cwd: string; readonly number: number }) => {
-    const key = `${input.cwd} ${input.number}`;
-    const held = locations.get(key);
-    if (held !== undefined) {
-      locations.delete(key);
-      locations.set(key, held);
-      return Effect.succeed(held);
-    }
-    return cli.getPullRequest({ cwd: input.cwd, number: input.number }).pipe(
-      Effect.map((pullRequest) => {
-        const location = pullRequest.location;
-        if (location === null) return null;
-        if (locations.size >= LOCATION_CACHE_CAPACITY) {
-          const oldest = locations.keys().next().value;
-          if (oldest !== undefined) locations.delete(oldest);
-        }
-        locations.set(key, location);
-        return location;
-      }),
-    );
-  };
+  const locationOf = (input: { readonly cwd: string; readonly number: number }) =>
+    Effect.gen(function* () {
+      const namespace = server === undefined ? "" : yield* server.credentialNamespace;
+      const key = `${namespace} ${input.cwd} ${input.number}`;
+      const held = locations.get(key);
+      if (held !== undefined) {
+        locations.delete(key);
+        locations.set(key, held);
+        return held;
+      }
+      return yield* cli.getPullRequest({ cwd: input.cwd, number: input.number }).pipe(
+        Effect.map((pullRequest) => {
+          const location = pullRequest.location;
+          if (location === null) return null;
+          if (locations.size >= LOCATION_CACHE_CAPACITY) {
+            const oldest = locations.keys().next().value;
+            if (oldest !== undefined) locations.delete(oldest);
+          }
+          locations.set(key, location);
+          return location;
+        }),
+      );
+    });
 
   const diffScope = (input: { readonly cwd: string; readonly number: number }) =>
     Effect.gen(function* () {
@@ -254,11 +293,20 @@ export const make = Effect.gen(function* () {
         });
   };
 
-  const provider: PullRequestProviderApi = {
-    kind: SourceControlProviderKind.make("azure-devops"),
-    capabilities: CAPABILITIES,
-    // The bare repository name repeats across an organization; the project path does not.
+  const withCredential: NonNullable<PullRequestProviderApi["withVerifiedCredential"]> = (
+    input,
+    use,
+  ) =>
+    server === undefined
+      ? Effect.die("No Server reader")
+      : server
+          .withVerifiedCredential(input, (identity) => use(identity).pipe(Effect.result))
+          .pipe(Effect.mapError(fail("authenticate")), Effect.flatMap(Effect.fromResult));
+  const provider = {
+    kind,
     repositoryKey: ({ canonicalKey }) => canonicalKey,
+    capabilities,
+    ...(server === undefined ? {} : { withVerifiedCredential: withCredential }),
 
     getViewer: (input) =>
       cli.getViewer({ cwd: input.cwd }).pipe(Effect.mapError(fail("getViewer"))),
@@ -322,7 +370,9 @@ export const make = Effect.gen(function* () {
                   }),
                 ),
                 Effect.map((listed) => listed.changes.length),
-                Effect.orElseSucceed(() => 0),
+                Effect.catch((error) =>
+                  server === undefined ? Effect.succeed(0) : Effect.fail(error),
+                ),
               );
         const detail: ProviderChangeRequestDetail = {
           ...toChangeRequest(pullRequest),
@@ -332,8 +382,12 @@ export const make = Effect.gen(function* () {
           closedAt: pullRequest.state === "closed" ? pullRequest.closedAt : null,
           reviewers: pullRequest.reviewers,
           checks: [],
-          mergeCapabilities: { merge: true, squash: true, rebase: false },
-          viewerPermissions: AZURE_DEVOPS_VIEWER_PERMISSIONS,
+          mergeCapabilities: {
+            merge: server === undefined,
+            squash: server === undefined,
+            rebase: false,
+          },
+          viewerPermissions: permissions,
           autoMergeEnabled: pullRequest.autoMergeEnabled,
           ...(pullRequest.autoMergeMethod === undefined
             ? {}
@@ -343,34 +397,47 @@ export const make = Effect.gen(function* () {
       }).pipe(Effect.mapError(fail("getChangeRequest"))),
 
     getChangeRequestActivity: (input) =>
-      cli.getPullRequest({ cwd: input.cwd, number: input.number }).pipe(
-        Effect.mapError(fail("getChangeRequestActivity")),
-        Effect.flatMap((pullRequest) =>
-          (pullRequest.location === null
-            ? Effect.succeed({ comments: [], truncated: true })
-            : cli
-                .listThreads({
-                  cwd: input.cwd,
-                  location: pullRequest.location,
-                  number: input.number,
-                })
-                .pipe(
-                  Effect.map((comments) => ({ comments, truncated: false })),
-                  Effect.orElseSucceed(() => ({ comments: [], truncated: true })),
-                )
-          ).pipe(
-            Effect.map((conversation): ProviderChangeRequestActivity => ({
-              comments: conversation.comments,
-              commentCount: conversation.comments.length,
-              commentsTruncated: conversation.truncated,
-              reviewThreads: [],
-              commits: [],
-            })),
+      cli
+        .getPullRequest({ cwd: input.cwd, number: input.number })
+        .pipe(
+          Effect.mapError(fail("getChangeRequestActivity")),
+          Effect.flatMap((pullRequest) =>
+            (pullRequest.location === null
+              ? Effect.succeed({ comments: [], truncated: true })
+              : cli
+                  .listThreads({
+                    cwd: input.cwd,
+                    location: pullRequest.location,
+                    number: input.number,
+                  })
+                  .pipe(
+                    Effect.map((comments) => ({ comments, truncated: false })),
+                    Effect.catch((error) =>
+                      server === undefined
+                        ? Effect.succeed({ comments: [], truncated: true })
+                        : Effect.fail(error),
+                    ),
+                  )
+            ).pipe(
+              Effect.map((conversation): ProviderChangeRequestActivity => ({
+                comments: conversation.comments,
+                commentCount: conversation.comments.length,
+                commentsTruncated: conversation.truncated,
+                reviewThreads: [],
+                commits: [],
+              })),
+            ),
+          ),
+        )
+        .pipe(
+          Effect.mapError((error) =>
+            isProviderError(error) ? error : fail("getChangeRequestActivity")(error),
           ),
         ),
-      ),
 
-    getViewerPermissions: () => Effect.succeed(AZURE_DEVOPS_VIEWER_PERMISSIONS),
+    // No request at all: Azure has nothing to say about the viewer that a pull request read can
+    // reach, so the answer is the same constant the detail carries.
+    getViewerPermissions: () => Effect.succeed(permissions),
 
     // `input.commit` is deliberately dropped: Azure states no commit list on a pull request, so
     // the Code tab has nothing to scope itself to and always asks for the whole change.
@@ -432,6 +499,12 @@ export const make = Effect.gen(function* () {
                   AzureDevOpsCommandFailedError: () => Effect.succeed(null),
                   AzureDevOpsPullRequestReadError: () => Effect.succeed(null),
                 }),
+                Effect.catchIf(
+                  (error) =>
+                    error._tag === "AzureDevOpsServerReadError" &&
+                    error.category === "item-unavailable",
+                  () => Effect.succeed(null),
+                ),
                 Effect.map((texts) => ({ change, texts })),
               ),
             { concurrency: DIFF_FILE_CONCURRENCY },
@@ -522,29 +595,33 @@ export const make = Effect.gen(function* () {
       }).pipe(Effect.mapError(fail("getFileRevisions"))),
 
     runAction: (input) =>
-      cli
-        .runPullRequestAction({
-          cwd: input.cwd,
-          number: input.number,
-          action: input.action,
-          ...(input.mergeMethod === undefined ? {} : { mergeMethod: input.mergeMethod }),
-        })
-        .pipe(Effect.mapError(fail("runAction"))),
+      server !== undefined
+        ? unsupported("runAction")
+        : cli
+            .runPullRequestAction({
+              cwd: input.cwd,
+              number: input.number,
+              action: input.action,
+              ...(input.mergeMethod === undefined ? {} : { mergeMethod: input.mergeMethod }),
+            })
+            .pipe(Effect.mapError(fail("runAction"))),
 
     updateChangeRequest: (input) =>
-      cli
-        .updatePullRequest({
-          cwd: input.cwd,
-          number: input.number,
-          title: input.title,
-          body: input.body,
-        })
-        .pipe(Effect.mapError(fail("updateChangeRequest"))),
+      server !== undefined
+        ? unsupported("updateChangeRequest")
+        : cli
+            .updatePullRequest({
+              cwd: input.cwd,
+              number: input.number,
+              title: input.title,
+              body: input.body,
+            })
+            .pipe(Effect.mapError(fail("updateChangeRequest"))),
 
     listReviewerCandidates: () =>
       Effect.fail(
         new PullRequestProviderError({
-          provider: SourceControlProviderKind.make("azure-devops"),
+          provider: kind,
           operation: "listReviewerCandidates",
           reason: "failed",
           detail: "Azure DevOps cannot say who may review a pull request.",
@@ -552,14 +629,18 @@ export const make = Effect.gen(function* () {
       ),
 
     setReviewerRequest: (input) =>
-      cli
-        .setPullRequestReviewers({
-          cwd: input.cwd,
-          number: input.number,
-          reviewers: input.reviewers.map((reviewer) => reviewer.id),
-          requested: input.requested,
-        })
-        .pipe(Effect.mapError(fail("setReviewerRequest"))),
+      server !== undefined
+        ? unsupported("setReviewerRequest")
+        : cli
+            .setPullRequestReviewers({
+              cwd: input.cwd,
+              number: input.number,
+              // Azure names an identity by an email address or a guid, and has no team to ask, so a
+              // candidate's id is the whole of what it takes.
+              reviewers: input.reviewers.map((reviewer) => reviewer.id),
+              requested: input.requested,
+            })
+            .pipe(Effect.mapError(fail("setReviewerRequest"))),
 
     comment: () => unsupported("comment"),
 
@@ -570,7 +651,36 @@ export const make = Effect.gen(function* () {
     setThreadResolution: () => unsupported("setThreadResolution"),
 
     setReaction: () => unsupported("setReaction"),
-  };
+  } satisfies PullRequestProviderApi;
 
-  return provider;
+  if (server === undefined) return provider;
+  const pinned = <I extends { readonly cwd: string }, A>(
+    input: I,
+    operation: Effect.Effect<A, PullRequestProviderError>,
+  ) =>
+    server
+      .withVerifiedCredential(input, () => operation)
+      .pipe(
+        Effect.mapError((error) => (isProviderError(error) ? error : fail("authenticate")(error))),
+      );
+  return {
+    ...provider,
+    getViewer: (input) => pinned(input, provider.getViewer(input)),
+    listChangeRequests: (input) => pinned(input, provider.listChangeRequests(input)),
+    getChangeRequestSummary: (input) => pinned(input, provider.getChangeRequestSummary(input)),
+    getChangeRequest: (input) => pinned(input, provider.getChangeRequest(input)),
+    getChangeRequestActivity: (input) => pinned(input, provider.getChangeRequestActivity(input)),
+    getDiff: (input) => pinned(input, provider.getDiff(input)),
+    getDiffFileContents: (input) => pinned(input, provider.getDiffFileContents(input)),
+    getFileRevisions: (input) => pinned(input, provider.getFileRevisions(input)),
+  } satisfies PullRequestProviderApi;
+});
+
+export const make = Effect.gen(function* () {
+  return yield* makeWithReader(yield* AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli);
+});
+
+export const makeServer = Effect.gen(function* () {
+  const api = yield* AzureDevOpsServerApi;
+  return yield* makeWithReader(api.reader, api);
 });

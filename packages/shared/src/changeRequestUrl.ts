@@ -1,4 +1,9 @@
-import type { RepositoryIdentity, ThreadLinkedPullRequest } from "@t3tools/contracts";
+import type {
+  AzureDevOpsServerProfile,
+  RepositoryIdentity,
+  ThreadLinkedPullRequest,
+} from "@t3tools/contracts";
+import { resolveAzureDevOpsServerAddress, azureDevOpsServerPullRequestUrl } from "./azureDevOps.ts";
 import { canonicalRepositoryKey } from "./sourceControl.ts";
 
 /**
@@ -18,7 +23,10 @@ function isHostOf(hostname: string, apex: string, label?: string): boolean {
   return label !== undefined && hostname.split(".").includes(label);
 }
 
-export function parseChangeRequestUrl(targetUrl: string): ChangeRequestLink | null {
+export function parseChangeRequestUrl(
+  targetUrl: string,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile> = [],
+): ChangeRequestLink | null {
   let url: URL;
   try {
     url = new URL(targetUrl);
@@ -26,6 +34,15 @@ export function parseChangeRequestUrl(targetUrl: string): ChangeRequestLink | nu
     return null;
   }
   if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  if (url.username || url.password) return null;
+  const server = resolveAzureDevOpsServerAddress(targetUrl, profiles);
+  if (server !== null && server.number !== null)
+    return {
+      host: server.host,
+      repository: server.canonicalKey.slice(server.host.length + 1),
+      number: server.number,
+      authority: server.host,
+    };
   const host = url.hostname.toLowerCase();
 
   if (host === "git.cafe" || host === "staging.git.cafe") {
@@ -51,6 +68,13 @@ export function parseChangeRequestUrl(targetUrl: string): ChangeRequestLink | nu
     const match = /^\/((?:[^/]+\/)*_git\/[^/]+)\/pullrequest\/(\d+)(?:\/|$)/u.exec(url.pathname);
     return claim(host, match);
   }
+  const serverRoute = /^\/((?:[^/]+\/)+_git\/[^/]+)\/pullrequest\/(\d+)(?:\/|$)/iu.exec(
+    url.pathname,
+  );
+  if (serverRoute !== null && url.protocol === "https:") {
+    const link = claim(url.host.toLowerCase(), serverRoute);
+    return link === null ? null : { ...link, authority: url.host.toLowerCase() };
+  }
   return null;
 }
 
@@ -68,6 +92,7 @@ export function changeRequestUrlFor(
   repository: string,
   number: number,
   remoteUrl?: string,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile> = [],
 ): string | null {
   switch (kind) {
     case "github":
@@ -93,8 +118,15 @@ export function changeRequestUrlFor(
       return `https://${host}/${repository}/-/merge_requests/${number}`;
     case "bitbucket":
       return `https://${host}/${repository}/pull-requests/${number}`;
-    case "azure-devops":
+    case "azure-devops-server":
+    case "azure-devops": {
+      const server = resolveAzureDevOpsServerAddress(
+        remoteUrl ?? `https://${host}/${repository}`,
+        profiles,
+      );
+      if (server !== null) return azureDevOpsServerPullRequestUrl(server, number);
       return `https://${canonicalRepositoryKey(`${host}/${repository}`.toLowerCase())}/pullrequest/${number}`;
+    }
     default:
       return null;
   }
@@ -164,9 +196,10 @@ export function pullRequestCandidateUrlFromReferenceAutolink(targetUrl: string):
 export function matchesLinkedPullRequestUrl(
   linkedPullRequest: ThreadLinkedPullRequest,
   targetUrl: string,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile> = [],
 ): boolean {
-  const linked = parseChangeRequestUrl(linkedPullRequest.url);
-  const target = parseChangeRequestUrl(targetUrl);
+  const linked = parseChangeRequestUrl(linkedPullRequest.url, profiles);
+  const target = parseChangeRequestUrl(targetUrl, profiles);
   return (
     linked !== null &&
     target !== null &&

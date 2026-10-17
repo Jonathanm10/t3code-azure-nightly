@@ -1,3 +1,4 @@
+import { AzureDevOpsServerSettings } from "@t3tools/shared/azureDevOps";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import { canonicalRepositoryKey } from "@t3tools/shared/sourceControl";
 import {
@@ -61,4 +62,20 @@ export const definition = defineSourceControlClient({
       canonicalRepositoryKey(`${link.host}/${link.repository}`.toLowerCase()),
   canReadChangeRequestOnHost: () => false,
   isChangeRequestUrl: (url) => isChangeRequestPath(url, "/pullrequest/"),
+});
+
+export const serverDefinition = defineSourceControlClient({
+  ...definition,
+  kind: SourceControlProviderKind.make("azure-devops-server"),
+  label: "Azure DevOps Server",
+  pickerLabel: "Azure DevOps Server",
+  publishDescription: "Read-only collection",
+  defaultCloneTransport: "https",
+  changeRequestActions: new Set<never>(),
+  checkoutCommand: () => null,
+  checkoutCommandArgument: () => null,
+  isChangeRequestReference: (url) =>
+    /^https:\/\/[^/]+\/(?:[^/]+\/)+_git\/[^/]+\/pullrequest\/\d+(?:[/?#].*)?$/iu.test(url),
+  isChangeRequestUrl: (url) => isChangeRequestPath(url, "/pullrequest/"),
+  settings: AzureDevOpsServerSettings,
 });

@@ -1,3 +1,4 @@
+import * as AzureDevOpsServerApi from "@t3tools/source-control-azure-devops/server/AzureDevOpsServerApi";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -48,6 +49,20 @@ const layerSourceControlProviderRegistryTest = (input: {
         }).pipe(Layer.provide(NodeServices.layer)),
         Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({}),
         Layer.mock(AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli)({}),
+        Layer.mock(AzureDevOpsServerApi.AzureDevOpsServerApi)({
+          reader: {
+            getViewer: () => Effect.die("Unexpected Server read"),
+            listPullRequests: () => Effect.die("Unexpected Server read"),
+            getPullRequest: () => Effect.die("Unexpected Server read"),
+            listThreads: () => Effect.die("Unexpected Server read"),
+            listIterations: () => Effect.die("Unexpected Server read"),
+            listIterationChanges: () => Effect.die("Unexpected Server read"),
+            readItemContent: () => Effect.die("Unexpected Server read"),
+            runPullRequestAction: () => Effect.die("Unexpected Server read"),
+            updatePullRequest: () => Effect.die("Unexpected Server read"),
+            setPullRequestReviewers: () => Effect.die("Unexpected Server read"),
+          },
+        }),
         Layer.mock(BitbucketApi.BitbucketApi)(input.bitbucket),
         Layer.mock(BitbucketPullRequestApi.BitbucketPullRequestApi)({}),
         ServerSettings.ServerSettingsService.layerTest(),
@@ -206,6 +221,12 @@ it.effect("reports implemented tools separately from locally available executabl
           account: Option.none(),
         },
         {
+          kind: SourceControlProviderKind.make("azure-devops-server"),
+          status: "available",
+          auth: "unknown",
+          account: Option.none(),
+        },
+        {
           kind: SourceControlProviderKind.make("bitbucket"),
           status: "available",
           auth: "unauthenticated",
@@ -355,6 +376,14 @@ Logged in to gitlab.com as gitlab-user
           auth: "authenticated",
           account: Option.some("azure-user@example.com"),
           detail: Option.none(),
+        },
+        {
+          kind: SourceControlProviderKind.make("azure-devops-server"),
+          auth: "unknown",
+          account: Option.none(),
+          detail: Option.some(
+            "Authentication is verified through Git when reading a configured collection.",
+          ),
         },
         {
           kind: SourceControlProviderKind.make("bitbucket"),

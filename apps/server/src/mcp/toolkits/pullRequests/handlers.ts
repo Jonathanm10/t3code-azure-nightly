@@ -1,3 +1,9 @@
+import { AzureDevOpsServerProfile, SourceControlProviderKind } from "@t3tools/contracts";
+import {
+  azureDevOpsServerProfiles,
+  resolveAzureDevOpsServerAddress,
+} from "@t3tools/shared/azureDevOps";
+import { ServerSettingsService } from "../../../serverSettings.ts";
 import {
   threadPullRequestsOf,
   threadPullRequestKeysEqual,
@@ -7,7 +13,6 @@ import {
   pullRequestHostOf,
   type OrchestrationProjectShell,
   type OrchestrationV2ThreadShell,
-  type SourceControlProviderKind,
   type ThreadId,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
@@ -57,11 +62,18 @@ interface ResolvedTarget {
   readonly url: string;
 }
 
-function projectHostAndProvider(project: OrchestrationProjectShell | undefined): {
+function projectHostAndProvider(
+  project: OrchestrationProjectShell | undefined,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile>,
+): {
   readonly host: string | null;
   readonly kind: SourceControlProviderKind | null;
 } {
   const identity = project?.repositoryIdentity;
+  const address =
+    identity == null ? null : resolveAzureDevOpsServerAddress(identity.locator.remoteUrl, profiles);
+  if (address !== null)
+    return { host: address.host, kind: SourceControlProviderKind.make("azure-devops-server") };
   const kind = (identity?.provider as SourceControlProviderKind | undefined) ?? null;
   if (!identity || kind === null) return { host: null, kind: null };
   return {
@@ -73,18 +85,22 @@ function projectHostAndProvider(project: OrchestrationProjectShell | undefined):
 const resolveTarget = Effect.fn("PullRequestsToolkit.resolveTarget")(function* (
   input: PullRequestTargetInput,
   project: OrchestrationProjectShell | undefined,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile>,
 ) {
   if (input.url !== undefined) {
-    const parsed = parseChangeRequestUrl(input.url);
+    const parsed = parseChangeRequestUrl(input.url, profiles);
     if (parsed === null) {
       return yield* new PullRequestUrlInvalidError({});
     }
-    return { ...normalizeThreadPullRequestKey(parsed), url: input.url } satisfies ResolvedTarget;
+    return {
+      ...normalizeThreadPullRequestKey(parsed, profiles),
+      url: input.url,
+    } satisfies ResolvedTarget;
   }
   if (input.repository === undefined || input.number === undefined) {
     return yield* new PullRequestTargetIncompleteError({});
   }
-  const projectHost = projectHostAndProvider(project);
+  const projectHost = projectHostAndProvider(project, profiles);
   const host = (input.host ?? projectHost.host)?.toLowerCase();
   if (host === undefined) {
     return yield* new PullRequestHostRequiredError({});
@@ -97,9 +113,10 @@ const resolveTarget = Effect.fn("PullRequestsToolkit.resolveTarget")(function* (
       repository,
       input.number,
       project?.repositoryIdentity?.locator.remoteUrl,
+      profiles,
     ) ?? `https://${host}/${repository}/pull/${input.number}`;
   return {
-    ...normalizeThreadPullRequestKey({ host, repository, number: input.number, url }),
+    ...normalizeThreadPullRequestKey({ host, repository, number: input.number, url }, profiles),
     url,
   } satisfies ResolvedTarget;
 });
@@ -153,6 +170,7 @@ function projectForPullRequest(
   projects: ReadonlyArray<OrchestrationProjectShell>,
   target: { readonly host: string; readonly repository: string },
   preferred: OrchestrationProjectShell | undefined,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile>,
 ): OrchestrationProjectShell | undefined {
   // The same rule the guide service uses: a pull request reads through a project whose checkout
   // names it with the same host-level key, which also maps Azure DevOps' org/project/_git/repo.
@@ -160,6 +178,7 @@ function projectForPullRequest(
     const own = pullRequestSyncKey(
       { projectId: project.id, host: target.host, repository: target.repository, number: 1 },
       project.repositoryIdentity ?? undefined,
+      profiles,
     );
     const projectKey =
       project.repositoryIdentity == null
@@ -171,6 +190,7 @@ function projectForPullRequest(
               number: 1,
             },
             project.repositoryIdentity,
+            profiles,
           );
     return (
       own !== null &&
@@ -184,6 +204,13 @@ function projectForPullRequest(
 }
 
 const make = Effect.gen(function* () {
+  const settings = yield* Effect.serviceOption(ServerSettingsService);
+  const readProfiles = Option.isSome(settings)
+    ? settings.value.getSettings.pipe(
+        Effect.map(azureDevOpsServerProfiles),
+        Effect.orElseSucceed(() => []),
+      )
+    : Effect.succeed([]);
   const engine = yield* Orchestrator.OrchestratorV2;
   const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
 
@@ -254,10 +281,12 @@ const make = Effect.gen(function* () {
   ) {
     const thread = yield* requireThread(PullRequestWatchFailedError, input.threadId);
     const project = yield* projectOf(thread, PullRequestWatchFailedError);
-    const target = yield* resolveTarget(input, project);
+    const profiles = yield* readProfiles;
+    const target = yield* resolveTarget(input, project, profiles);
     const watchedLink = (shell: OrchestrationV2ThreadShell) =>
       threadPullRequestsOf(shell).find(
-        (link) => link.source !== "stack-dismissed" && threadPullRequestKeysEqual(link, target),
+        (link) =>
+          link.source !== "stack-dismissed" && threadPullRequestKeysEqual(link, target, profiles),
       );
     if (watching && thread.lineage.relationshipToParent === "subagent") {
       return yield* new PullRequestWatchFromSubagentError();
@@ -304,12 +333,13 @@ const make = Effect.gen(function* () {
       .listShells()
       .pipe(Effect.mapError((cause) => new PullRequestListFailedError({ cause })));
     const callerProject = known.find((project) => project.id === callerThread?.projectId);
+    const profiles = yield* readProfiles;
     return yield* Effect.forEach(targets, (input) =>
-      resolveTarget(input, callerProject).pipe(
+      resolveTarget(input, callerProject, profiles).pipe(
         Effect.map((target) => ({
           input,
           target,
-          project: projectForPullRequest(known, target, callerProject),
+          project: projectForPullRequest(known, target, callerProject, profiles),
           failure: null,
         })),
         Effect.catch((error) =>
@@ -341,9 +371,10 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const thread = yield* requireThread(PullRequestLinkFailedError, input.threadId);
         const project = yield* projectOf(thread, PullRequestLinkFailedError);
-        const target = yield* resolveTarget(input, project);
+        const profiles = yield* readProfiles;
+        const target = yield* resolveTarget(input, project, profiles);
         const existing = threadPullRequestsOf(thread).find((link) =>
-          threadPullRequestKeysEqual(link, target),
+          threadPullRequestKeysEqual(link, target, profiles),
         );
         if (existing && existing.source !== "stack-dismissed")
           return { ...target, alreadyLinked: true };
@@ -370,8 +401,13 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const thread = yield* requireThread(PullRequestUnlinkFailedError, input.threadId);
         const project = yield* projectOf(thread, PullRequestUnlinkFailedError);
-        const target = yield* resolveTarget(input, project);
-        if (!threadPullRequestsOf(thread).some((link) => threadPullRequestKeysEqual(link, target)))
+        const profiles = yield* readProfiles;
+        const target = yield* resolveTarget(input, project, profiles);
+        if (
+          !threadPullRequestsOf(thread).some((link) =>
+            threadPullRequestKeysEqual(link, target, profiles),
+          )
+        )
           return {
             host: target.host,
             repository: target.repository,

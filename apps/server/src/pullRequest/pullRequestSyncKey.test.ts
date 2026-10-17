@@ -5,6 +5,39 @@ import { pullRequestSyncKey } from "./pullRequestSyncKey.ts";
 
 describe("pullRequestSyncKey", () => {
   const reference = { projectId: ProjectId.make("project"), repository: "web", number: 7 };
+  it("recovers configured Server identities and browser aliases without rewriting stored projects", () => {
+    const profiles = [
+      {
+        apiCollectionUrl: "https://git.example.test:8443/tfs/C",
+        browserCollectionUrl: "https://web.example.test/C",
+      },
+    ];
+    const identity = {
+      canonicalKey: "git.example.test/tfs/c/p/_git/web",
+      provider: "unknown",
+      locator: {
+        source: "git-remote" as const,
+        remoteName: "origin",
+        remoteUrl: "https://git.example.test:8443/tfs/C/P/_git/Web",
+      },
+    };
+    const expected = { host: "git.example.test:8443", repository: "tfs/c/p/_git/web", number: 7 };
+    expect(pullRequestSyncKey(reference, identity, profiles)).toEqual(expected);
+    expect(
+      pullRequestSyncKey({ ...reference, host: "web.example.test" }, identity, profiles),
+    ).toEqual(expected);
+    expect(
+      pullRequestSyncKey(
+        { ...reference, host: "web.example.test", repository: "C/P/_git/Web" },
+        undefined,
+        profiles,
+      ),
+    ).toEqual(expected);
+    expect(
+      pullRequestSyncKey({ ...reference, host: "other.example.test" }, identity, profiles),
+    ).toBeNull();
+    expect(identity.provider).toBe("unknown");
+  });
   it.each([
     "dev.azure.com/org/project/_git/web",
     "ssh.dev.azure.com/v3/org/project/web",

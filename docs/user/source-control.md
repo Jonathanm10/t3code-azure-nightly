@@ -87,7 +87,7 @@ export T3CODE_BITBUCKET_EMAIL="you@example.com"
 export T3CODE_BITBUCKET_API_TOKEN="your-token"
 ```
 
-### Azure DevOps
+### Azure DevOps Services
 
 Install [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/), add the DevOps extension, and sign in:
 
@@ -95,6 +95,17 @@ Install [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/), add the DevOp
 az extension add --name azure-devops
 az login
 ```
+
+### Azure DevOps Server
+
+In **Settings → Source Control → Azure DevOps Server**, add the HTTPS collection URL from your
+checkout's Git remote. If browser links use a different address, add that collection URL too.
+Save the collections and open Pull Requests. Authentication uses the checkout's Git credential
+helper on the environment machine. No Azure CLI or token saved in T3 Code is required.
+
+Server integration reads lists, authorship, review requests, details, conversations, and diffs.
+Create PR, review writes, merge, and PR checkout are unavailable. Ordinary Git commit and push
+remain available. Use the host website for pull request changes.
 
 ### GitCafe
 
@@ -172,7 +183,7 @@ On web and desktop, hold **Shift** in the GitHub pull request list for quick act
 To close several, press **Close**, drag across the rows in the same group, and release.
 Press **Escape** before releasing to cancel. Failed closes stay in the list so you can retry them.
 
-GitHub, GitLab, and Azure DevOps support auto-merge while checks are outstanding. GitHub also
+GitHub, GitLab, and Azure DevOps Services support auto-merge while checks are outstanding. GitHub also
 supports approving waiting fork workflows and opening a revert pull request for a merged change.
 
 GitHub sharing is off by default. In Settings → Connections → GitHub sharing (Environments on mobile), choose

@@ -490,6 +490,10 @@
     "./PtyAdapter": {
       "types": "./src/PtyAdapter.ts",
       "import": "./src/PtyAdapter.ts"
+    },
+    "./azureDevOps": {
+      "types": "./src/azureDevOps.ts",
+      "import": "./src/azureDevOps.ts"
     }
   },
   "scripts": {

@@ -18,7 +18,11 @@ import { useEnvironmentQuery } from "~/state/query";
 
 import { PreviewCard, PreviewCardPopup, PreviewCardTrigger } from "../ui/preview-card";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { PullRequestActorAvatar, resolvePullRequestState } from "./pullRequestPresentation";
+import {
+  PullRequestActorAvatar,
+  pullRequestActorPresentation,
+  resolvePullRequestState,
+} from "./pullRequestPresentation";
 
 interface PullRequestLinkPreviewTarget {
   readonly environmentId: EnvironmentId;
@@ -91,12 +95,7 @@ export function PullRequestLinkPreview({
     detail === null
       ? null
       : resolvePullRequestState({ state: detail.state, isDraft: detail.isDraft });
-  const authorLabel =
-    detail?.author === null
-      ? "ghost"
-      : detail?.author.name && detail.author.name !== detail.author.login
-        ? `${detail.author.name} (@${detail.author.login})`
-        : (detail?.author.login ?? null);
+  const authorLabel = detail === null ? null : pullRequestActorPresentation(detail.author).tooltip;
 
   return (
     <PreviewCard open={open} onOpenChange={setOpen} actionsRef={previewActionsRef}>

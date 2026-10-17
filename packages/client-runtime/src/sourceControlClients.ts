@@ -29,6 +29,7 @@ const BUILT_IN_SOURCE_CONTROL_CLIENTS = [
   Forgejo.definition,
   Bitbucket.definition,
   AzureDevOps.definition,
+  AzureDevOps.serverDefinition,
 ];
 
 export const sourceControlClients = makeSourceControlClientRegistry(

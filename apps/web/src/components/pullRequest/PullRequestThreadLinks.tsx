@@ -1,3 +1,4 @@
+import { azureDevOpsServerProfiles } from "@t3tools/shared/azureDevOps";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
@@ -6,6 +7,7 @@ import { CheckIcon, MessageSquareIcon } from "lucide-react";
 import { useState } from "react";
 import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
+import { useEnvironmentSettings } from "~/hooks/useSettings";
 
 import { parseChangeRequestUrl } from "~/lib/openPullRequestLink";
 import { normalizeThreadPullRequestKey } from "@t3tools/shared/threadPullRequests";
@@ -49,7 +51,8 @@ function EnabledPullRequestThreadLinks({
   display,
   onPickerOpenChange,
 }: PullRequestThreadLinksProps) {
-  const parsed = parseChangeRequestUrl(url);
+  const profiles = useEnvironmentSettings(environmentId, azureDevOpsServerProfiles);
+  const parsed = parseChangeRequestUrl(url, profiles);
   const thread = useThreadShell(threadRef?.environmentId === environmentId ? threadRef : null);
   const currentThreadRef = thread === null ? null : threadRef;
   const linking = usePullRequestLinking(environmentId);
@@ -61,7 +64,7 @@ function EnabledPullRequestThreadLinks({
           input:
             parsed === null
               ? reference
-              : { ...reference, ...normalizeThreadPullRequestKey(parsed) },
+              : { ...reference, ...normalizeThreadPullRequestKey(parsed, profiles) },
         })
       : null,
   );
@@ -93,7 +96,7 @@ function EnabledPullRequestThreadLinks({
       appAtomRegistry.refresh(
         pullRequestEnvironment.linkedThreads({
           environmentId,
-          input: { ...reference, ...normalizeThreadPullRequestKey(parsed) },
+          input: { ...reference, ...normalizeThreadPullRequestKey(parsed, profiles) },
         }),
       );
     }

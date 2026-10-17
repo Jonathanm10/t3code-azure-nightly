@@ -4,14 +4,32 @@ import {
   type RepositoryIdentity,
   SourceControlProviderKind,
   type ThreadPullRequestKey,
+  type AzureDevOpsServerProfile,
 } from "@t3tools/contracts";
+import { resolveAzureDevOpsServerAddress } from "@t3tools/shared/azureDevOps";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import { normalizeThreadPullRequestKey } from "@t3tools/shared/threadPullRequests";
 
 export function pullRequestSyncKey(
   reference: PullRequestRef,
   identity?: RepositoryIdentity | null,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile> = [],
 ): ThreadPullRequestKey | null {
+  const server =
+    identity == null ? null : resolveAzureDevOpsServerAddress(identity.locator.remoteUrl, profiles);
+  if (server !== null && !reference.repository.includes("/")) {
+    const hosts = [server.host, new URL(server.browserCollectionUrl).host.toLowerCase()];
+    if (
+      reference.repository.toLowerCase() !== server.repository.toLowerCase() ||
+      (reference.host !== undefined && !hosts.includes(reference.host.toLowerCase()))
+    )
+      return null;
+    return {
+      host: server.host,
+      repository: server.canonicalKey.slice(server.host.length + 1),
+      number: reference.number,
+    };
+  }
   if (identity?.provider === "azure-devops" && !reference.repository.includes("/")) {
     if (
       reference.repository.toLowerCase() !==
@@ -36,9 +54,12 @@ export function pullRequestSyncKey(
       : undefined);
   return host === undefined
     ? null
-    : normalizeThreadPullRequestKey({
-        host,
-        repository: reference.repository,
-        number: reference.number,
-      });
+    : normalizeThreadPullRequestKey(
+        {
+          host,
+          repository: reference.repository,
+          number: reference.number,
+        },
+        profiles,
+      );
 }

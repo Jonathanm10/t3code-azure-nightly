@@ -4,6 +4,10 @@ import {
   sourceControlRepositorySelector,
 } from "@t3tools/shared/sourceControl";
 import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
+import {
+  azureDevOpsServerProfiles,
+  resolveAzureDevOpsServerAddress,
+} from "@t3tools/shared/azureDevOps";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -156,7 +160,17 @@ const routingCredential = Context.Reference<{
   readonly credentialFingerprint: string;
   readonly viewer: string;
 } | null>("t3/PullRequestService/routingCredential", { defaultValue: () => null });
+// Internal only: the client cannot choose its cache's credential namespace.
+const encodeCacheKey = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const credentialNamespace = Symbol("pullRequestCredentialNamespace");
+const serverReadScope = Symbol("azureDevOpsServerReadScope");
+type ServerCredentialScope =
+  | { readonly kind: "verified"; readonly viewer: string; readonly credentialFingerprint: string }
+  | { readonly kind: "unavailable"; readonly error: PullRequestProviderError };
+const serverCredentialScopes = Context.Reference<ReadonlyMap<string, ServerCredentialScope>>(
+  "t3/PullRequestService/serverCredentialScopes",
+  { defaultValue: () => new Map() },
+);
 type CredentialRef = PullRequestRef & { readonly [credentialNamespace]?: string };
 
 export class PullRequestService extends Context.Service<
@@ -298,6 +312,7 @@ const REVIEWER_REQUEST_REFUSAL = "You need write access on this repository to as
 const LABEL_CHANGE_REFUSAL = "You need triage access on this repository to change its labels.";
 
 export interface SupportedProject {
+  readonly viewerScope?: string;
   readonly cursorKey: string;
   readonly project: OrchestrationProjectShell;
   readonly api: PullRequestProviderApi;
@@ -581,6 +596,10 @@ export const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const repositoryIdentities = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const sourceControlProviders = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
+  const azureProfiles = serverSettings.getSettings.pipe(
+    Effect.map(azureDevOpsServerProfiles),
+    Effect.orElseSucceed(() => []),
+  );
   const rateLimits = yield* SourceControlRateLimit.SourceControlRateLimit;
   const filesViewedStore = yield* PullRequestFilesViewed.PullRequestFilesViewedRepository;
   const readCache = yield* PullRequestReadCache.PullRequestReadCache;
@@ -588,6 +607,7 @@ export const make = Effect.gen(function* () {
   const refineUnknownProjectKinds = (
     projects: ReadonlyArray<OrchestrationProjectShell>,
     filter: Pick<PullRequestListInput, "projectId" | "host">,
+    profiles: Parameters<typeof resolveAzureDevOpsServerAddress>[1],
   ) => {
     type RefinementCandidate = {
       readonly project: OrchestrationProjectShell;
@@ -599,6 +619,11 @@ export const make = Effect.gen(function* () {
     for (const project of projects) {
       if (filter.projectId !== undefined && project.id !== filter.projectId) continue;
       const identity = project.repositoryIdentity;
+      if (
+        identity != null &&
+        resolveAzureDevOpsServerAddress(identity.locator.remoteUrl, profiles) !== null
+      )
+        continue;
       if (
         (identity?.provider !== "unknown" &&
           !(identity?.provider === "forgejo" && isSshRemoteUrl(identity.locator.remoteUrl))) ||
@@ -693,11 +718,13 @@ export const make = Effect.gen(function* () {
         ),
       ),
       Effect.flatMap((projects) =>
-        refineUnknownProjectKinds(projects, filter).pipe(
-          Effect.map((refinedProviders) => ({ refinedProviders, projects })),
+        Effect.flatMap(azureProfiles, (profiles) =>
+          refineUnknownProjectKinds(projects, filter, profiles).pipe(
+            Effect.map((refinedProviders) => ({ refinedProviders, projects, profiles })),
+          ),
         ),
       ),
-      Effect.map(({ refinedProviders, projects }) => {
+      Effect.map(({ refinedProviders, projects, profiles }) => {
         const supported: SupportedProject[] = [];
         const unimplemented = new Map<
           string,
@@ -710,21 +737,30 @@ export const make = Effect.gen(function* () {
           if (filter.projectIds !== undefined && !filter.projectIds.includes(project.id)) continue;
           const identity = project.repositoryIdentity;
           let kind = identity?.provider as SourceControlProviderKind | undefined;
-          const repository = sourceControlRepositorySelector(project.repositoryIdentity);
+          const address =
+            identity == null
+              ? null
+              : resolveAzureDevOpsServerAddress(identity.locator.remoteUrl, profiles);
+          if (address !== null) kind = SourceControlProviderKind.make("azure-devops-server");
+          else if (kind === "azure-devops-server") kind = SourceControlProviderKind.make("unknown");
+          const repository =
+            address?.repository ?? sourceControlRepositorySelector(project.repositoryIdentity);
           if (!identity || kind === undefined || repository === null) continue;
           let refinedProvider: SourceControlProviderInfo | null | undefined;
           if (
-            kind === "unknown" ||
-            (kind === "forgejo" && isSshRemoteUrl(identity.locator.remoteUrl))
+            address === null &&
+            (kind === "unknown" ||
+              (kind === "forgejo" && isSshRemoteUrl(identity.locator.remoteUrl)))
           ) {
             const provider = detectSourceControlProviderFromRemoteUrl(identity.locator.remoteUrl);
             refinedProvider = provider === null ? null : refinedProviders.get(provider.baseUrl);
             kind = refinedProvider?.kind ?? kind;
           }
           const host =
-            refinedProvider?.kind === "forgejo"
+            address?.host ??
+            (refinedProvider?.kind === "forgejo"
               ? new URL(refinedProvider.baseUrl).host.toLowerCase()
-              : pullRequestHostOf(identity, kind);
+              : pullRequestHostOf(identity, kind));
           if (filter.host !== undefined && host !== filter.host.toLowerCase()) {
             continue;
           }
@@ -735,8 +771,12 @@ export const make = Effect.gen(function* () {
             else if (!roots.includes(project.workspaceRoot)) roots.push(project.workspaceRoot);
           }
           const repositoryKey =
-            api?.repositoryKey?.({ canonicalKey: identity.canonicalKey }) ?? null;
-          const key = listCursorKey(host, repositoryKey ?? repository);
+            api?.repositoryKey?.({
+              canonicalKey: address?.canonicalKey ?? identity.canonicalKey,
+            }) ?? null;
+          const viewerScope =
+            address === null ? undefined : `${address.canonicalKey}|${project.id}`;
+          const key = viewerScope ?? listCursorKey(host, repositoryKey ?? repository);
           if (seen.has(key)) continue;
           seen.add(key);
           if (api === null) {
@@ -747,6 +787,7 @@ export const make = Effect.gen(function* () {
           }
           supported.push({
             cursorKey: key,
+            ...(viewerScope === undefined ? {} : { viewerScope }),
             project,
             api: withRateLimitBackoff(api, host, rateLimits),
             repository,
@@ -760,95 +801,167 @@ export const make = Effect.gen(function* () {
       }),
     );
 
+  const withServerCredentials = <A, E, R>(
+    filter: Pick<PullRequestListInput, "projectId" | "projectIds" | "host">,
+    operation: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E | PullRequestError, R> =>
+    Effect.gen(function* () {
+      if ((yield* azureProfiles).length === 0) return yield* operation;
+      const { supported } = yield* listWorkspaceProjects(filter);
+      const servers = supported.filter((project) => project.api.kind === "azure-devops-server");
+      const existing = yield* serverCredentialScopes;
+      const pin = (
+        index: number,
+        scopes: typeof existing,
+      ): Effect.Effect<A, E | PullRequestError, R> => {
+        const project = servers[index];
+        if (project === undefined)
+          return operation.pipe(Effect.provideService(serverCredentialScopes, scopes));
+        const verify = project.api.withVerifiedCredential;
+        if (verify === undefined)
+          return Effect.fail(new PullRequestUnavailableError({ reason: "provider-unsupported" }));
+        return verify(
+          {
+            cwd: project.project.workspaceRoot,
+            host: project.host,
+            ...(project.project.repositoryIdentity == null
+              ? {}
+              : { remoteUrl: project.project.repositoryIdentity.locator.remoteUrl }),
+          },
+          (identity) =>
+            pin(
+              index + 1,
+              new Map(scopes).set(project.viewerScope ?? project.host, {
+                kind: "verified",
+                viewer: identity.viewer,
+                credentialFingerprint: identity.credentialFingerprint,
+              }),
+            ).pipe(Effect.result),
+        ).pipe(
+          Effect.catch((error) =>
+            pin(
+              index + 1,
+              new Map(scopes).set(project.viewerScope ?? project.host, {
+                kind: "unavailable",
+                error,
+              }),
+            ).pipe(Effect.result),
+          ),
+          Effect.flatMap(Effect.fromResult),
+        );
+      };
+      return yield* pin(0, existing);
+    });
+
   /**
    * Azure derives its organization from the checkout, so it requires a matching
    * repository.
    */
-  const requireProject = (ref: PullRequestRef): Effect.Effect<SupportedProject, PullRequestError> =>
-    listWorkspaceProjects({ projectId: ref.projectId }).pipe(
-      Effect.flatMap(({ supported }): Effect.Effect<SupportedProject, PullRequestError> => {
-        const own = supported[0];
-        const repository = ref.repository.trim();
-        const host = ref.host?.trim().toLowerCase();
-        if (own !== undefined && own.repository.toLowerCase() === repository.toLowerCase()) {
-          if (host === undefined || host === own.host) return Effect.succeed(own);
-        }
-        if (host === undefined) {
-          if (own === undefined) {
-            return Effect.fail(new PullRequestUnavailableError({ reason: "provider-unsupported" }));
+  const requireProject = (
+    input: PullRequestRef,
+  ): Effect.Effect<SupportedProject, PullRequestError> =>
+    Effect.flatMap(azureProfiles, (profiles) => {
+      const address =
+        input.host === undefined
+          ? null
+          : resolveAzureDevOpsServerAddress(`https://${input.host}/${input.repository}`, profiles);
+      const ref =
+        address === null
+          ? input
+          : {
+              ...input,
+              host: address.host,
+              repository: address.canonicalKey.slice(address.host.length + 1),
+            };
+      return listWorkspaceProjects({ projectId: ref.projectId }).pipe(
+        Effect.flatMap(({ supported }): Effect.Effect<SupportedProject, PullRequestError> => {
+          const own = supported[0];
+          const repository = ref.repository.trim();
+          const host = ref.host?.trim().toLowerCase();
+          if (own !== undefined && own.repository.toLowerCase() === repository.toLowerCase()) {
+            if (host === undefined || host === own.host) return Effect.succeed(own);
           }
-          return Effect.fail(
-            new PullRequestOperationError({
-              operation: "resolveRepository",
-              detail: "The change request does not belong to the selected project.",
+          if (host === undefined) {
+            if (own === undefined) {
+              return Effect.fail(
+                new PullRequestUnavailableError({ reason: "provider-unsupported" }),
+              );
+            }
+            return Effect.fail(
+              new PullRequestOperationError({
+                operation: "resolveRepository",
+                detail: "The change request does not belong to the selected project.",
+              }),
+            );
+          }
+          const repositoryKey = canonicalRepositoryKey(`${host}/${repository}`.toLowerCase());
+          if (own?.api.kind === "azure-devops-server" && own.repositoryKey === repositoryKey)
+            return Effect.succeed(own);
+          // Azure SSH and legacy clone hosts differ from the browser URL's host. Compare
+          // the complete repository identity before narrowing those checkouts by host.
+          return listWorkspaceProjects(
+            repositoryKey.startsWith("dev.azure.com/") ? {} : { host },
+          ).pipe(
+            Effect.flatMap(({ supported }) => {
+              const onHost = supported.filter((candidate) => candidate.host === host);
+              const route =
+                supported.find(
+                  (candidate) =>
+                    candidate.repositoryKey !== null && candidate.repositoryKey === repositoryKey,
+                ) ??
+                onHost.find(
+                  (candidate) =>
+                    candidate.repositoryKey === null &&
+                    candidate.repository.toLowerCase() === repository.toLowerCase(),
+                ) ??
+                onHost.find((candidate) => candidate.repositoryKey === null);
+              if (route === undefined) {
+                return Effect.gen(function* () {
+                  const provider = ["github.com", "bitbucket.org", "codeberg.org"].includes(host)
+                    ? detectSourceControlProviderFromRemoteUrl(`https://${host}/${repository}.git`)
+                    : null;
+                  const api = provider === null ? null : registry.get(provider.kind);
+                  if (api !== null) {
+                    const selected = yield* projects.getShell(ref.projectId).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new PullRequestOperationError({
+                            operation: "resolveRepository",
+                            detail: "The selected project could not be read.",
+                            cause,
+                          }),
+                      ),
+                    );
+                    if (Option.isSome(selected)) {
+                      return {
+                        cursorKey: listCursorKey(host, repository),
+                        project: selected.value,
+                        api: withRateLimitBackoff(api, host, rateLimits),
+                        repository,
+                        host,
+                        remote: normalizeGitRemoteUrl(`https://${host}/${repository}`),
+                        repositoryKey: null,
+                      };
+                    }
+                  }
+                  return yield* new PullRequestUnavailableError({ reason: "provider-unsupported" });
+                });
+              }
+              return Effect.succeed(
+                route.repositoryKey !== null ||
+                  route.repository.toLowerCase() === repository.toLowerCase()
+                  ? route
+                  : {
+                      ...route,
+                      repository,
+                      remote: normalizeGitRemoteUrl(`https://${host}/${repository}`),
+                    },
+              );
             }),
           );
-        }
-        const repositoryKey = canonicalRepositoryKey(`${host}/${repository}`.toLowerCase());
-        // Azure SSH and legacy clone hosts differ from the browser URL's host. Compare
-        // the complete repository identity before narrowing those checkouts by host.
-        return listWorkspaceProjects(
-          repositoryKey.startsWith("dev.azure.com/") ? {} : { host },
-        ).pipe(
-          Effect.flatMap(({ supported }) => {
-            const onHost = supported.filter((candidate) => candidate.host === host);
-            const route =
-              supported.find(
-                (candidate) =>
-                  candidate.repositoryKey !== null && candidate.repositoryKey === repositoryKey,
-              ) ??
-              onHost.find(
-                (candidate) =>
-                  candidate.repositoryKey === null &&
-                  candidate.repository.toLowerCase() === repository.toLowerCase(),
-              ) ??
-              onHost.find((candidate) => candidate.repositoryKey === null);
-            if (route === undefined) {
-              return Effect.gen(function* () {
-                const provider = ["github.com", "bitbucket.org", "codeberg.org"].includes(host)
-                  ? detectSourceControlProviderFromRemoteUrl(`https://${host}/${repository}.git`)
-                  : null;
-                const api = provider === null ? null : registry.get(provider.kind);
-                if (api !== null) {
-                  const selected = yield* projects.getShell(ref.projectId).pipe(
-                    Effect.mapError(
-                      (cause) =>
-                        new PullRequestOperationError({
-                          operation: "resolveRepository",
-                          detail: "The selected project could not be read.",
-                          cause,
-                        }),
-                    ),
-                  );
-                  if (Option.isSome(selected)) {
-                    return {
-                      cursorKey: listCursorKey(host, repository),
-                      project: selected.value,
-                      api: withRateLimitBackoff(api, host, rateLimits),
-                      repository,
-                      host,
-                      remote: normalizeGitRemoteUrl(`https://${host}/${repository}`),
-                      repositoryKey: null,
-                    };
-                  }
-                }
-                return yield* new PullRequestUnavailableError({ reason: "provider-unsupported" });
-              });
-            }
-            return Effect.succeed(
-              route.repositoryKey !== null ||
-                route.repository.toLowerCase() === repository.toLowerCase()
-                ? route
-                : {
-                    ...route,
-                    repository,
-                    remote: normalizeGitRemoteUrl(`https://${host}/${repository}`),
-                  },
-            );
-          }),
-        );
-      }),
-    );
+        }),
+      );
+    });
 
   const canonicalRef = Effect.fn("PullRequestService.canonicalRef")(function* <
     I extends PullRequestRef,
@@ -905,6 +1018,7 @@ export const make = Effect.gen(function* () {
   };
 
   type ResolvedViewer = {
+    readonly viewerScope?: string;
     readonly host: string;
     readonly kind: SourceControlProviderKind;
     readonly viewer: string | null;
@@ -958,9 +1072,45 @@ export const make = Effect.gen(function* () {
     options?: { readonly allowPaused: boolean },
   ) =>
     Effect.forEach(
-      [...new Set(projects.map(({ host }) => host))],
-      (host) =>
-        Effect.flatMap(Clock.currentTimeMillis, (now): Effect.Effect<ResolvedViewer> => {
+      [...new Set(projects.map((project) => project.viewerScope ?? project.host))],
+      (scope) => {
+        const scopedProject = projects.find(
+          (project) => (project.viewerScope ?? project.host) === scope,
+        )!;
+        const host = scopedProject.host;
+        if (scopedProject.api.kind === "azure-devops-server")
+          return Effect.flatMap(serverCredentialScopes, (scopes) => {
+            const current = scopes.get(scope);
+            if (current !== undefined)
+              return Effect.succeed<ResolvedViewer>({
+                host,
+                kind: SourceControlProviderKind.make("azure-devops-server"),
+                viewerScope: scope,
+                viewer: current.kind === "verified" ? current.viewer : null,
+                error: current.kind === "unavailable" ? current.error : null,
+              });
+            return scopedProject.api
+              .getViewer({ cwd: scopedProject.project.workspaceRoot, host })
+              .pipe(
+                Effect.map((viewer): ResolvedViewer => ({
+                  host,
+                  kind: SourceControlProviderKind.make("azure-devops-server"),
+                  viewer,
+                  viewerScope: scope,
+                  error: null,
+                })),
+                Effect.catch((error) =>
+                  Effect.succeed<ResolvedViewer>({
+                    host,
+                    kind: SourceControlProviderKind.make("azure-devops-server"),
+                    viewer: null,
+                    viewerScope: scope,
+                    error,
+                  }),
+                ),
+              );
+          });
+        return Effect.flatMap(Clock.currentTimeMillis, (now): Effect.Effect<ResolvedViewer> => {
           const held = viewersByHost.get(host);
           if (held !== undefined && now - held.at <= Duration.toMillis(VIEWER_CACHE_TTL)) {
             return Effect.succeed(held.result);
@@ -995,7 +1145,8 @@ export const make = Effect.gen(function* () {
               }),
             ),
           );
-        }),
+        });
+      },
       { concurrency: REPOSITORY_CONCURRENCY },
     );
 
@@ -1091,23 +1242,33 @@ export const make = Effect.gen(function* () {
       const viewerResults = yield* resolveViewers(projects, viewerRoots);
       const viewers: Record<string, string> = {};
       for (const result of viewerResults) {
-        if (result.viewer !== null) viewers[result.host] = result.viewer;
+        if (result.viewer !== null) viewers[result.viewerScope ?? result.host] = result.viewer;
       }
+      const publicViewers = Object.fromEntries(
+        viewerResults.flatMap((result) =>
+          result.viewer === null ? [] : [[result.host, result.viewer]],
+        ),
+      );
 
       const providers: ReadonlyArray<PullRequestProviderSummary> = [
-        ...viewerResults.map((result) => {
-          const capabilities = projects.find((project) => project.host === result.host)?.api
-            .capabilities;
-          return {
-            host: result.host,
-            kind: result.kind,
-            searchesOnHost: capabilities?.search ?? false,
-            actions: capabilities?.actions ?? [],
-            projectCount: projectCounts.get(result.host) ?? 1,
-            configured: result.viewer !== null,
-            detail: result.error === null ? null : providerDetail(result.error),
-          };
-        }),
+        ...viewerResults
+          .filter(
+            (result, index, all) =>
+              all.findIndex((candidate) => candidate.host === result.host) === index,
+          )
+          .map((result) => {
+            const capabilities = projects.find((project) => project.host === result.host)?.api
+              .capabilities;
+            return {
+              host: result.host,
+              kind: result.kind,
+              searchesOnHost: capabilities?.search ?? false,
+              actions: capabilities?.actions ?? [],
+              projectCount: projectCounts.get(result.host) ?? 1,
+              configured: result.viewer !== null,
+              detail: result.error === null ? null : providerDetail(result.error),
+            };
+          }),
         ...[...unimplemented].map(([host, { kind, projectCount }]) => ({
           host,
           kind,
@@ -1123,9 +1284,20 @@ export const make = Effect.gen(function* () {
         continuation === null
           ? projects
           : projects.filter(({ cursorKey }) => continuation.has(cursorKey));
-      const readable = selected.filter(({ host }) => viewers[host] !== undefined);
+      const seenServerAccounts = new Set<string>();
+      const readable = selected.filter((project) => {
+        const viewer = viewers[project.viewerScope ?? project.host];
+        if (viewer === undefined) return false;
+        if (project.api.kind !== "azure-devops-server") return true;
+        const key = `${project.remote}|${viewer}`;
+        if (seenServerAccounts.has(key)) return false;
+        seenServerAccounts.add(key);
+        return true;
+      });
+      // A host that could not be read still has projects, and they are absent from the list.
+      // Reporting them keeps "N repositories were unavailable" honest instead of dropping them.
       const unreadable = selected
-        .filter(({ host }) => viewers[host] === undefined)
+        .filter((project) => viewers[project.viewerScope ?? project.host] === undefined)
         .map(({ project, repository }) => ({
           projectId: project.id,
           projectTitle: project.title,
@@ -1143,7 +1315,7 @@ export const make = Effect.gen(function* () {
         }
 
         return {
-          viewers: viewers as PullRequestListResult["viewers"],
+          viewers: publicViewers,
           providers,
           entries: [],
           errors: [],
@@ -1158,7 +1330,7 @@ export const make = Effect.gen(function* () {
 
       const readRepository = (project: SupportedProject): Effect.Effect<RepositoryBatch> => {
         {
-          const viewer = viewers[project.host]!;
+          const viewer = viewers[project.viewerScope ?? project.host]!;
           const key = project.cursorKey;
           const cursor = cursorOf(project);
           return project.api
@@ -1230,7 +1402,7 @@ export const make = Effect.gen(function* () {
         const separately = () =>
           Effect.forEach(chunk, readRepository, { concurrency: REPOSITORY_CONCURRENCY });
         if (readAcross === undefined) return separately();
-        const viewer = viewers[first.host]!;
+        const viewer = viewers[first.viewerScope ?? first.host]!;
         const cursor = cursorOf(first);
         return readAcross({
           cwd: first.project.workspaceRoot,
@@ -1348,7 +1520,7 @@ export const make = Effect.gen(function* () {
       }
 
       return {
-        viewers: viewers as PullRequestListResult["viewers"],
+        viewers: publicViewers,
         providers,
         entries: batches
           .flatMap((batch) => batch.entries)
@@ -2630,6 +2802,7 @@ export const make = Effect.gen(function* () {
     read: Effect.Effect<A, PullRequestError>,
   ) {
     const project = yield* requireProject(input);
+    if (project.api.kind === "azure-devops-server") return yield* read;
     const key = [
       operation,
       project.api.kind,
@@ -2733,37 +2906,48 @@ export const make = Effect.gen(function* () {
       timeToLive: (exit) => (Exit.isSuccess(exit) ? LIST_CACHE_TTL : Duration.zero),
     },
   );
-  const list: PullRequestService["Service"]["list"] = (input) => {
-    const key = JSON.stringify([
-      listingsEpoch,
-      input.state,
-      input.involvement ?? null,
-      input.filters === undefined
-        ? null
-        : [
-            input.filters.draft ?? null,
-            input.filters.review ?? null,
-            input.filters.checks ?? null,
-            input.filters.author ?? null,
-            input.filters.labels ?? null,
-            input.filters.excludedLabels ?? null,
-          ],
-      input.projectId ?? null,
-      input.projectIds === undefined ? null : [...input.projectIds].sort(),
-      input.host ?? null,
-      input.limit ?? null,
-      input.query ?? null,
-      input.cursors === undefined
-        ? null
-        : Object.entries(input.cursors).toSorted(([left], [right]) => left.localeCompare(right)),
-    ]);
-    // A replacement reader can join a lookup still finishing its previous reader's cancellation.
-    return Cache.get(listCache, key).pipe(
-      Effect.catchCause((cause) =>
-        Cause.hasInterruptsOnly(cause) ? Cache.get(listCache, key) : Effect.failCause(cause),
-      ),
-    );
-  };
+  const list: PullRequestService["Service"]["list"] = (input) =>
+    Effect.gen(function* () {
+      const scopes = yield* serverCredentialScopes;
+      const key = encodeCacheKey([
+        listingsEpoch,
+        input.state,
+        input.involvement ?? null,
+        // Positional so two identical filter sets key alike however their record was assembled.
+        input.filters === undefined
+          ? null
+          : [
+              input.filters.draft ?? null,
+              input.filters.review ?? null,
+              input.filters.checks ?? null,
+              input.filters.author ?? null,
+              input.filters.labels ?? null,
+              input.filters.excludedLabels ?? null,
+            ],
+        input.projectId ?? null,
+        // Sorted so the same narrowing keys alike however the caller ordered it.
+        input.projectIds === undefined ? null : [...input.projectIds].sort(),
+        input.host ?? null,
+        input.limit ?? null,
+        input.query ?? null,
+        input.cursors === undefined
+          ? null
+          : Object.entries(input.cursors).toSorted(([left], [right]) => left.localeCompare(right)),
+        [...scopes]
+          .map(([key, value]) => [
+            key,
+            value.kind === "verified"
+              ? value.credentialFingerprint
+              : `unavailable:${value.error.reason}:${value.error.retryAt ?? ""}`,
+          ])
+          .sort(),
+      ]);
+      return yield* Cache.get(listCache, key).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause) ? Cache.get(listCache, key) : Effect.failCause(cause),
+        ),
+      );
+    });
 
   const checksCache = yield* Cache.makeWith(
     (key: string) => {
@@ -3052,7 +3236,7 @@ export const make = Effect.gen(function* () {
       ),
       Effect.ensuring(Effect.sync(armDiffSweep)),
     );
-    return staleDiff.serve(key, read);
+    return serverReadScope in input ? read : staleDiff.serve(key, read);
   };
 
   const filesViewedCache = yield* Cache.makeWith(
@@ -3090,11 +3274,20 @@ export const make = Effect.gen(function* () {
       timeToLive: (exit) => (Exit.isSuccess(exit) ? LIST_STATS_CACHE_TTL : Duration.zero),
     },
   );
-  const statsBatchKey = (refs: Iterable<PullRequestRef>) =>
+  const statsBatchKey = (refs: Iterable<CredentialRef>) =>
     JSON.stringify([
       listingsEpoch,
       [...refs]
-        .map((ref) => [ref.projectId, ref.repository, ref.number, refEpoch(ref)] as const)
+        .map(
+          (ref) =>
+            [
+              ref.projectId,
+              ref.repository,
+              ref.number,
+              refEpoch(ref),
+              ref[credentialNamespace] ?? null,
+            ] as const,
+        )
         .toSorted((left, right) =>
           `${left[0]} ${left[1]} ${left[2]}`.localeCompare(`${right[0]} ${right[1]} ${right[2]}`),
         ),
@@ -3239,6 +3432,34 @@ export const make = Effect.gen(function* () {
     (input: I, ...args: Args) =>
       Effect.gen(function* () {
         const ref = yield* canonicalRef(input);
+        const project = yield* requireProject(ref);
+        if (
+          project.api.kind === "azure-devops-server" &&
+          project.api.withVerifiedCredential !== undefined
+        ) {
+          const result = yield* project.api
+            .withVerifiedCredential(
+              {
+                cwd: project.project.workspaceRoot,
+                host: project.host,
+                ...(project.project.repositoryIdentity == null
+                  ? {}
+                  : { remoteUrl: project.project.repositoryIdentity.locator.remoteUrl }),
+              },
+              (identity) =>
+                read(
+                  {
+                    ...ref,
+                    allowStale: false,
+                    [serverReadScope]: true,
+                    [credentialNamespace]: identity.credentialFingerprint,
+                  },
+                  ...args,
+                ).pipe(Effect.provideService(routingCredential, identity), Effect.result),
+            )
+            .pipe(Effect.mapError(toPullRequestError("authenticate")));
+          return yield* Effect.fromResult(result);
+        }
         const credential = yield* routingCredential;
         return yield* read(
           credential === null
@@ -3252,10 +3473,28 @@ export const make = Effect.gen(function* () {
     routing,
     routingIdentity,
     withRoutingCredential,
-    list,
+    list: (input) => withServerCredentials(input, list(input)),
     listStats: (input) =>
-      Effect.forEach(input.refs, (ref) => canonicalRef(ref).pipe(Effect.option)).pipe(
-        Effect.flatMap((refs) => listStats({ ...input, refs: refs.flatMap(Option.toArray) })),
+      withServerCredentials(
+        { projectIds: [...new Set(input.refs.map((ref) => ref.projectId))] },
+        Effect.gen(function* () {
+          const scopes = yield* serverCredentialScopes;
+          const refs = yield* Effect.forEach(input.refs, (ref) =>
+            Effect.gen(function* () {
+              const canonical = yield* canonicalRef(ref);
+              const project = yield* requireProject(canonical);
+              const identity = scopes.get(project.viewerScope ?? project.host);
+              if (identity?.kind === "unavailable") return yield* identity.error;
+              return identity === undefined
+                ? canonical
+                : {
+                    ...canonical,
+                    [credentialNamespace]: identity.credentialFingerprint,
+                  };
+            }).pipe(Effect.option),
+          );
+          return yield* listStats({ ...input, refs: refs.flatMap(Option.toArray) });
+        }),
       ),
     summary: credentialCached(summary),
     stack: credentialCached(stack),
@@ -3277,11 +3516,11 @@ export const make = Effect.gen(function* () {
     ),
     activity: credentialCached(activity),
     preview: credentialCached(preview),
-    threadComments,
+    threadComments: credentialCached(threadComments),
     diff: credentialCached(diff),
-    diffFileContents,
+    diffFileContents: credentialCached(diffFileContents),
     filesViewed: credentialCached(filesViewed),
-    setFilesViewed,
+    setFilesViewed: credentialCached(setFilesViewed),
     runAction: runActionAndInvalidate,
     update: invalidatedByMutation(update),
     comment: invalidatedByMutation(comment),

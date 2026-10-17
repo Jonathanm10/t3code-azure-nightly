@@ -1,3 +1,4 @@
+import { canCreateChangeRequest } from "@t3tools/shared/sourceControl";
 import type {
   GitRunStackedActionResult,
   GitStackedAction,
@@ -177,6 +178,7 @@ export function buildMenuItems(
     gitStatus.aheadCount > 0 &&
     (gitStatus.hasUpstream || canPushWithoutUpstream);
   const canCreatePr =
+    canCreateChangeRequest(gitStatus.sourceControlProvider) &&
     !isBusy &&
     hasBranch &&
     !hasOpenPr &&
@@ -265,7 +267,7 @@ export function resolveQuickAction(
     if (!gitStatus.hasUpstream && !hasPrimaryRemote) {
       return { label: "Commit", disabled: false, kind: "run_action", action: "commit" };
     }
-    if (hasOpenPr || isDefaultRef) {
+    if (hasOpenPr || isDefaultRef || !canCreateChangeRequest(gitStatus.sourceControlProvider)) {
       return { label: "Commit & push", disabled: false, kind: "run_action", action: "commit_push" };
     }
     return {
@@ -300,7 +302,7 @@ export function resolveQuickAction(
         hint: "No local commits to push.",
       };
     }
-    if (hasOpenPr || isDefaultRef) {
+    if (hasOpenPr || isDefaultRef || !canCreateChangeRequest(gitStatus.sourceControlProvider)) {
       return {
         label: "Push",
         disabled: false,
@@ -334,7 +336,7 @@ export function resolveQuickAction(
   }
 
   if (isAhead) {
-    if (hasOpenPr || isDefaultRef) {
+    if (hasOpenPr || isDefaultRef || !canCreateChangeRequest(gitStatus.sourceControlProvider)) {
       return {
         label: "Push",
         disabled: false,
@@ -359,7 +361,11 @@ export function resolveQuickAction(
     };
   }
 
-  if (hasDefaultBranchDelta && !isDefaultRef) {
+  if (
+    hasDefaultBranchDelta &&
+    !isDefaultRef &&
+    canCreateChangeRequest(gitStatus.sourceControlProvider)
+  ) {
     return {
       label: `Create ${terminology.shortLabel}`,
       disabled: false,

@@ -38,6 +38,10 @@
     "./server/driver": {
       "types": "./src/server/driver.ts",
       "import": "./src/server/driver.ts"
+    },
+    "./server/AzureDevOpsServerApi": {
+      "types": "./src/server/AzureDevOpsServerApi.ts",
+      "import": "./src/server/AzureDevOpsServerApi.ts"
     }
   },
   "scripts": {
@@ -46,6 +50,7 @@
   },
   "dependencies": {
     "@t3tools/contracts": "workspace:*",
+    "@t3tools/provider-core": "workspace:*",
     "@t3tools/shared": "workspace:*",
     "@t3tools/source-control-core": "workspace:*",
     "diff": "8.0.3",

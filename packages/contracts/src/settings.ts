@@ -1033,6 +1033,56 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+const AzureDevOpsCollectionUrl = TrimmedNonEmptyString.check(
+  Schema.makeFilter((value) => {
+    try {
+      const url = new URL(value);
+      return (
+        (url.protocol === "https:" &&
+          !url.username &&
+          !url.password &&
+          !url.search &&
+          !url.hash &&
+          !url.pathname.split("/").some((part) => /^(?:_git|_apis)$/iu.test(part))) ||
+        "Use an HTTPS collection URL without credentials, query parameters or repository routes."
+      );
+    } catch {
+      return "Use a valid HTTPS collection URL.";
+    }
+  }),
+);
+
+export const AzureDevOpsServerProfile = Schema.Struct({
+  apiCollectionUrl: AzureDevOpsCollectionUrl,
+  browserCollectionUrl: Schema.optionalKey(AzureDevOpsCollectionUrl),
+});
+export type AzureDevOpsServerProfile = typeof AzureDevOpsServerProfile.Type;
+
+export const AzureDevOpsServerProfiles = Schema.Array(AzureDevOpsServerProfile).check(
+  Schema.makeFilter((profiles) => {
+    const roots: Array<{ index: number; origin: string; path: string }> = [];
+    for (const [index, profile] of profiles.entries()) {
+      for (const value of [profile.apiCollectionUrl, profile.browserCollectionUrl]) {
+        if (value === undefined) continue;
+        const url = new URL(value);
+        const path = `${url.pathname.replace(/\/+$/u, "").toLowerCase()}/`;
+        if (
+          roots.some(
+            (root) =>
+              !(root.index === index && root.path === path) &&
+              root.origin === url.origin &&
+              (path.startsWith(root.path) || root.path.startsWith(path)),
+          )
+        ) {
+          return "Azure DevOps Server collection profiles must not overlap.";
+        }
+        roots.push({ index, origin: url.origin, path });
+      }
+    }
+    return true;
+  }),
+);
+
 export const ServerSettings = Schema.Struct({
   // Null means no client has migrated this preference yet; an empty value is
   // authoritative so another device cannot resurrect cleared preferences.

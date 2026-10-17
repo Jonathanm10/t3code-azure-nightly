@@ -21,6 +21,7 @@ import { azureDevOpsPullRequestWebUrl } from "./azureDevOpsPullRequests.ts";
  * depending on the command.
  */
 const RawIdentitySchema = Schema.Struct({
+  id: Schema.optional(Schema.NullOr(Schema.String)),
   displayName: Schema.optional(Schema.NullOr(Schema.String)),
   uniqueName: Schema.optional(Schema.NullOr(Schema.String)),
   imageUrl: Schema.optional(Schema.NullOr(Schema.String)),
@@ -144,8 +145,14 @@ function normalizeRefName(refName: string): string {
 }
 
 /** A login has to compare against `az account show`, which reports an email. */
-function toActor(raw: Schema.Schema.Type<typeof RawIdentitySchema> | null | undefined) {
-  const login = trimmed(raw?.uniqueName) ?? trimmed(raw?.displayName);
+function toActor(
+  raw: Schema.Schema.Type<typeof RawIdentitySchema> | null | undefined,
+  identity: "cloud" | "server" = "cloud",
+) {
+  const login =
+    identity === "server"
+      ? (trimmed(raw?.id)?.toLowerCase() ?? null)
+      : (trimmed(raw?.uniqueName) ?? trimmed(raw?.displayName));
   return login === null
     ? null
     : { login, name: trimmed(raw?.displayName), avatarUrl: trimmed(raw?.imageUrl) };
@@ -203,10 +210,11 @@ function toAutoMergeMethod(
 
 function toPullRequest(
   raw: Schema.Schema.Type<typeof RawPullRequestSchema>,
+  identity: "cloud" | "server" = "cloud",
 ): AzureDevOpsPullRequest | null {
   const autoMergeMethod = toAutoMergeMethod(raw);
   const reviewers = (raw.reviewers ?? []).flatMap((reviewer) => {
-    const actor = toActor(reviewer);
+    const actor = toActor(reviewer, identity);
     return actor === null ? [] : [actor];
   });
   const closedAt = trimmed(raw.closedDate);
@@ -227,7 +235,7 @@ function toPullRequest(
     number: raw.pullRequestId,
     title: raw.title,
     url,
-    author: toActor(raw.createdBy),
+    author: toActor(raw.createdBy, identity),
     headBranch,
     baseBranch,
     state: toState(raw),
@@ -263,6 +271,7 @@ export interface AzureDevOpsPullRequestBatch {
 
 export function decodePullRequestListJson(
   raw: string,
+  identity: "cloud" | "server" = "cloud",
 ): Result.Result<AzureDevOpsPullRequestBatch, DecodeFailure> {
   const decoded = decodeUnknownList(raw);
   if (!Result.isSuccess(decoded)) {
@@ -273,7 +282,7 @@ export function decodePullRequestListJson(
   for (const [rawIndex, entry] of decoded.success.entries()) {
     const item = decodePullRequestEntry(entry);
     if (Exit.isFailure(item)) continue;
-    const pullRequest = toPullRequest(item.value);
+    const pullRequest = toPullRequest(item.value, identity);
     if (pullRequest !== null) {
       items.push(pullRequest);
       rawIndexes.push(rawIndex);
@@ -285,10 +294,11 @@ export function decodePullRequestListJson(
 /** Null carries "Azure answered, but with too little to use", which the caller reports. */
 export function decodePullRequestJson(
   raw: string,
+  identity: "cloud" | "server" = "cloud",
 ): Result.Result<AzureDevOpsPullRequest | null, DecodeFailure> {
   const decoded = decodePullRequest(raw);
   return Result.isSuccess(decoded)
-    ? Result.succeed(toPullRequest(decoded.success))
+    ? Result.succeed(toPullRequest(decoded.success, identity))
     : Result.fail(decoded.failure);
 }
 
@@ -301,6 +311,7 @@ export function decodeViewerJson(raw: string): Result.Result<string | null, Deco
 
 export function decodeThreadsJson(
   raw: string,
+  identity: "cloud" | "server" = "cloud",
 ): Result.Result<ReadonlyArray<PullRequestComment>, DecodeFailure> {
   const decoded = decodeThreadPage(raw);
   if (!Result.isSuccess(decoded)) {
@@ -326,7 +337,7 @@ export function decodeThreadsJson(
       comments.push({
         id: `${thread.id}:${comment.id ?? 0}`,
         kind: path === null ? "issue-comment" : "review-comment",
-        author: toActor(comment.author),
+        author: toActor(comment.author, identity),
         body: comment.content ?? "",
         createdAt: publishedDate,
         url: null,

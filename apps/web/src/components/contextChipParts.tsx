@@ -1,4 +1,8 @@
-import type { EnvironmentId, PullRequestContextMetadata } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  PullRequestContextMetadata,
+  ScopedThreadRef,
+} from "@t3tools/contracts";
 import { CircleDashedIcon, FilmIcon, ImageIcon } from "lucide-react";
 import {
   useState,
@@ -92,13 +96,18 @@ export function ContextChipPopover(props: {
 export function PullRequestChip(props: {
   metadata: PullRequestContextMetadata;
   environmentId: EnvironmentId | null;
+  threadRef?: ScopedThreadRef | undefined;
   label: string;
   kindLabel: string;
   kind: ContextChipKind;
   copyMarkdown?: string;
   onOpen: (event: MouseEvent<HTMLElement>, url: string) => void;
 }) {
-  const previewTarget = usePullRequestPreviewTarget(props.environmentId, props.metadata.url);
+  const previewTarget = usePullRequestPreviewTarget(
+    props.environmentId,
+    props.metadata.url,
+    props.threadRef,
+  );
   const displayState =
     props.metadata.state === "open" && props.metadata.isDraft ? "draft" : props.metadata.state;
   const StateIcon = PULL_REQUEST_STATE_PRESENTATION[displayState].Icon;

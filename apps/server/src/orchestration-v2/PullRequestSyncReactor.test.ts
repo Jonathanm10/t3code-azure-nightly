@@ -1,3 +1,5 @@
+import { ServerSettingsService } from "../serverSettings.ts";
+import type { AzureDevOpsServerProfile } from "@t3tools/contracts";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Stream from "effect/Stream";
 import {
@@ -163,6 +165,7 @@ function makeSummary(
 }
 
 interface HarnessOptions {
+  readonly profiles?: ReadonlyArray<AzureDevOpsServerProfile>;
   readonly invalidate?: PullRequestService.PullRequestService["Service"]["invalidate"];
   readonly snapshot: TestShellSnapshot;
   readonly summary?: (
@@ -217,6 +220,9 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
   };
 
   const layerDependencies = Layer.mergeAll(
+    ServerSettingsService.layerTest({
+      sourceControlHosts: { "azure-devops-server": { profiles: options.profiles ?? [] } },
+    }),
     Layer.mock(PullRequestService.PullRequestService)({
       summary,
       stack,
@@ -1152,3 +1158,73 @@ describe("PullRequestSyncReactor", () => {
     ),
   );
 });
+
+it.effect(
+  "isolates Server project refreshes and retains a refresh until every group succeeds",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const host = "git.example.test";
+        const repository = "tfs/C/P/_git/Repo";
+        const link = {
+          ...makeLink(42),
+          host,
+          repository,
+          url: `https://web.example.test/${repository}/pullrequest/42`,
+        };
+        const a = ProjectId.make("server-a");
+        const b = ProjectId.make("server-b");
+        let failB = true;
+        const invalidated: string[] = [];
+        const fixture = yield* makeHarness({
+          profiles: [
+            {
+              apiCollectionUrl: `https://${host}/tfs/C`,
+              browserCollectionUrl: "https://web.example.test/tfs/C",
+            },
+          ],
+          snapshot: makeSnapshot([
+            makeThread("a", { projectId: a, pullRequests: [link] }),
+            makeThread("b", { projectId: b, pullRequests: [link] }),
+          ]),
+          invalidate: (input) =>
+            Effect.sync(() => {
+              if (input.reference) invalidated.push(input.reference.projectId);
+            }),
+          summary: (input) =>
+            input.projectId === b && failB
+              ? Effect.fail(
+                  new PullRequestOperationError({
+                    operation: "summary",
+                    detail: "Account B unavailable",
+                  }),
+                )
+              : Effect.succeed(makeSummary(input, { title: input.projectId, stack: null })),
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* startAndSweep(fixture);
+          assert.deepStrictEqual(
+            (yield* Ref.get(fixture.summaryCalls)).map((ref) => ref.projectId).sort(),
+            [a, b],
+          );
+          assert.deepStrictEqual(
+            (yield* Ref.get(fixture.syncCommands)).map((command) => command.threadId),
+            [ThreadId.make("a")],
+          );
+          yield* reactor.requestSync({ host, repository, number: 42 });
+          yield* reactor.drain;
+          assert.deepStrictEqual(invalidated.sort(), [a, b]);
+          failB = false;
+          yield* sweepAgain(fixture, reactor);
+          assert.deepStrictEqual(invalidated.sort(), [a, a, b, b]);
+          const answers = yield* Ref.get(fixture.syncCommands);
+          assert.strictEqual(
+            answers.findLast((command) => command.threadId === ThreadId.make("b"))?.snapshot.title,
+            b,
+          );
+          yield* sweepAgain(fixture, reactor);
+          assert.strictEqual(invalidated.length, 4);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+);

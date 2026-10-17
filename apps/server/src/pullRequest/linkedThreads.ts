@@ -7,6 +7,7 @@ import {
   PullRequestLinkedThreadsResult,
   PullRequestOperationError,
   type ThreadPullRequestKey,
+  type AzureDevOpsServerProfile,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -15,8 +16,8 @@ import * as SqlClient from "effect/sql/SqlClient";
 const decodeLinkedThreads = Schema.decodeUnknownEffect(PullRequestLinkedThreadsResult);
 
 export const listLinkedPullRequestThreads = Effect.fn("listLinkedPullRequestThreads")(
-  function* (input: ThreadPullRequestKey) {
-    const key = normalizeThreadPullRequestKey(input);
+  function* (input: ThreadPullRequestKey, profiles: ReadonlyArray<AzureDevOpsServerProfile> = []) {
+    const key = normalizeThreadPullRequestKey(input, profiles);
     const sql = yield* SqlClient.SqlClient;
     const rows = yield* sql<{
       id: string;
@@ -58,6 +59,7 @@ export const listLinkedPullRequestThreads = Effect.fn("listLinkedPullRequestThre
         threadPullRequestKeysEqual(
           row.host === null ? legacyThreadPullRequestKey(row) : { ...row, host: row.host },
           key,
+          profiles,
         ),
       )
       .map(({ id, projectId, title, archivedAt }) => ({ id, projectId, title, archivedAt }));

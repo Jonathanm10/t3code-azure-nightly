@@ -1,6 +1,9 @@
+import { azureDevOpsServerProfiles } from "@t3tools/shared/azureDevOps";
 import { useMemo } from "react";
+import { resolveAzureDevOpsServerAddress } from "@t3tools/shared/azureDevOps";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import type {
+  AzureDevOpsServerProfile,
   EnvironmentId,
   ScopedThreadRef,
   ThreadLinkedPullRequest,
@@ -33,10 +36,11 @@ export function canLinkChangeRequest(
   mode: ReturnType<typeof threadPullRequestLinkMode>,
   projects: ReadonlyArray<EnvironmentProject>,
   parsed: ChangeRequestLink,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile> = [],
 ): boolean {
   if (mode === "unsupported") return false;
   if (mode === "multiple") return true;
-  return findProjectForChangeRequest(projects, parsed) !== undefined;
+  return findProjectForChangeRequest(projects, parsed, () => profiles) !== undefined;
 }
 
 export function usePullRequestLinking(environmentId: EnvironmentId | null | undefined) {
@@ -49,12 +53,18 @@ export function usePullRequestLinking(environmentId: EnvironmentId | null | unde
   const unlink = useAtomCommand(threadEnvironment.unlinkPullRequest, { reportFailure: false });
   const updateMetadata = useAtomCommand(threadEnvironment.updateMetadata, { reportFailure: false });
   return useMemo(() => {
+    const profiles =
+      environmentId == null
+        ? []
+        : azureDevOpsServerProfiles(
+            configs.get(environmentId)?.settings ?? { sourceControlHosts: {} },
+          );
     const environmentProjects = projects.filter(
       (project) => project.environmentId === environmentId,
     );
     const canLink = (url: string) => {
-      const parsed = parseChangeRequestUrl(url);
-      return parsed !== null && canLinkChangeRequest(mode, environmentProjects, parsed);
+      const parsed = parseChangeRequestUrl(url, profiles);
+      return parsed !== null && canLinkChangeRequest(mode, environmentProjects, parsed, profiles);
     };
     const isLinked = (
       thread: {
@@ -67,28 +77,37 @@ export function usePullRequestLinking(environmentId: EnvironmentId | null | unde
       if (mode !== "multiple")
         return (
           thread.linkedPullRequest != null &&
-          matchesLinkedPullRequestUrl(thread.linkedPullRequest, url)
+          matchesLinkedPullRequestUrl(thread.linkedPullRequest, url, profiles)
         );
-      const parsed = parseChangeRequestUrl(url);
+      const parsed = parseChangeRequestUrl(url, profiles);
       return (
         parsed !== null &&
         visibleThreadPullRequests(thread.pullRequests ?? []).some((entry) =>
-          threadPullRequestKeysEqual(entry, parsed),
+          threadPullRequestKeysEqual(entry, parsed, profiles),
         )
       );
     };
     const changeLink = async (threadRef: ScopedThreadRef, url: string, linked: boolean) => {
-      const parsed = parseChangeRequestUrl(url);
+      const parsed = parseChangeRequestUrl(url, profiles);
       if (parsed === null || threadRef.environmentId !== environmentId || (linked && !canLink(url)))
         throw new Error("The pull request is not available in this environment.");
-      const legacyProject = findProjectForChangeRequest(environmentProjects, parsed);
+      const legacyProject = findProjectForChangeRequest(
+        environmentProjects,
+        parsed,
+        () => profiles,
+      );
       const mutation = planThreadPullRequestMutation({
         capabilities,
         threadId: threadRef.threadId,
         reference: { ...parsed, url },
         legacyProjectId: legacyProject?.id ?? null,
         legacyRepository:
-          sourceControlRepositorySelector(legacyProject?.repositoryIdentity) ?? undefined,
+          resolveAzureDevOpsServerAddress(
+            legacyProject?.repositoryIdentity?.locator.remoteUrl ?? "",
+            profiles,
+          )?.repository ??
+          sourceControlRepositorySelector(legacyProject?.repositoryIdentity) ??
+          undefined,
         linked,
       });
       if (mutation === null)
@@ -104,5 +123,5 @@ export function usePullRequestLinking(environmentId: EnvironmentId | null | unde
       }
     };
     return { mode, canLink, isLinked, changeLink };
-  }, [capabilities, environmentId, link, mode, projects, unlink, updateMetadata]);
+  }, [capabilities, configs, environmentId, link, mode, projects, unlink, updateMetadata]);
 }

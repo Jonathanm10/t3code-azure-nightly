@@ -12,6 +12,7 @@ import type {
 } from "@t3tools/contracts";
 
 import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
+import type { AzureDevOpsServerReadError } from "./AzureDevOpsServerApi.ts";
 import {
   decodeItemContentJson,
   decodeIterationChangesJson,
@@ -96,6 +97,7 @@ export class AzureDevOpsReviewerNameError extends Schema.TaggedError<AzureDevOps
 }
 
 export type AzureDevOpsPullRequestCliError =
+  | AzureDevOpsServerReadError
   | AzureDevOpsCli.AzureDevOpsCliError
   | AzureDevOpsPullRequestReadError
   | AzureDevOpsPullRequestIncompleteError
@@ -145,6 +147,7 @@ export class AzureDevOpsPullRequestCli extends Context.Service<
 
     readonly listPullRequests: (input: {
       readonly cwd: string;
+      readonly headBranch?: string;
       readonly repository: string;
       readonly state: PullRequestListState;
       readonly involvement: PullRequestInvolvement;

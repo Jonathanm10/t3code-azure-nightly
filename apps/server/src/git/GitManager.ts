@@ -1,3 +1,4 @@
+import { azureDevOpsServerProfiles } from "@t3tools/shared/azureDevOps";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as Cache from "effect/Cache";
@@ -58,6 +59,8 @@ import {
 import {
   canonicalRepositoryKey,
   getChangeRequestTerminologyForKind,
+  canCreateChangeRequest,
+  detectSourceControlProviderFromRemoteUrl,
   isSshRemoteUrl,
   type ChangeRequestTerminology,
 } from "@t3tools/shared/sourceControl";
@@ -1385,7 +1388,22 @@ export const make = Effect.gen(function* () {
       (yield* readConfigValueNullable(cwd, `remote.${preferredRemoteName}.url`)) ??
       (yield* readConfigValueNullable(cwd, "remote.origin.url"));
 
-    const provider = remoteUrl ? detectSourceControlProviderFromGitRemoteUrl(remoteUrl) : null;
+    const profiles = azureDevOpsServerProfiles(
+      yield* serverSettingsService.getSettings.pipe(
+        Effect.mapError(
+          () =>
+            new GitCommandError({
+              operation: "resolveHostingProvider",
+              command: "git",
+              cwd,
+              detail: "Source control settings could not be read.",
+            }),
+        ),
+      ),
+    );
+    const provider = remoteUrl
+      ? detectSourceControlProviderFromRemoteUrl(remoteUrl, profiles)
+      : null;
     if (!remoteUrl || provider?.kind !== "unknown") return provider;
     const handle = yield* sourceControlProviders
       .resolveHandle({
@@ -1860,6 +1878,13 @@ export const make = Effect.gen(function* () {
     }
 
     const openPr = latestOpenPr ?? explicitResultPr;
+    const canOfferPrCreation =
+      (result.action !== "push" && result.action !== "commit_push") ||
+      currentBranchIsDefault ||
+      openPr !== null ||
+      canCreateChangeRequest(
+        yield* resolveHostingProvider(cwd, finalBranchContext?.branch ?? null),
+      );
 
     const cta =
       result.action === "commit" && result.commit.status === "created"
@@ -1883,7 +1908,8 @@ export const make = Effect.gen(function* () {
             }
           : (result.action === "push" || result.action === "commit_push") &&
               result.push.status === "pushed" &&
-              !currentBranchIsDefault
+              !currentBranchIsDefault &&
+              canOfferPrCreation
             ? {
                 kind: "run_action" as const,
                 label: `Create ${terms.shortLabel}`,
@@ -2901,6 +2927,16 @@ export const make = Effect.gen(function* () {
           (input.action === "create_pr" &&
             (!initialStatus.hasUpstream || initialStatus.aheadCount > 0));
         const wantsPr = input.action === "create_pr" || input.action === "commit_push_pr";
+        if (
+          wantsPr &&
+          !canCreateChangeRequest(yield* resolveHostingProvider(input.cwd, initialStatus.branch))
+        ) {
+          return yield* new GitManagerError({
+            operation: "runStackedAction",
+            cwd: input.cwd,
+            detail: "Azure DevOps Server pull requests are read-only in T3.",
+          });
+        }
 
         if (input.featureBranch && !wantsCommit) {
           return yield* new GitManagerError({

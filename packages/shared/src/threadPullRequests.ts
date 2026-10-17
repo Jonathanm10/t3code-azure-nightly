@@ -5,7 +5,9 @@ import type {
   ThreadLinkedPullRequest,
   ThreadPullRequestKey,
   ThreadPullRequestLink,
+  AzureDevOpsServerProfile,
 } from "@t3tools/contracts";
+import { resolveAzureDevOpsServerAddress } from "./azureDevOps.ts";
 
 import { pullRequestHostOf } from "@t3tools/contracts";
 import { parseChangeRequestUrl } from "./changeRequestUrl.ts";
@@ -18,8 +20,19 @@ type ThreadPullRequestKeySource = ThreadPullRequestKey & {
 
 export function normalizeThreadPullRequestKey(
   key: ThreadPullRequestKeySource,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile> = [],
 ): ThreadPullRequestKey {
-  const parsed = key.url === undefined ? null : parseChangeRequestUrl(key.url);
+  const server = resolveAzureDevOpsServerAddress(
+    key.url ?? `https://${key.host}/${key.repository}`,
+    profiles,
+  );
+  if (server !== null)
+    return {
+      host: server.host,
+      repository: server.canonicalKey.slice(server.host.length + 1),
+      number: key.number,
+    };
+  const parsed = key.url === undefined ? null : parseChangeRequestUrl(key.url, profiles);
   const authority =
     key.authority ??
     (parsed?.repository === key.repository.trim().toLowerCase() && parsed.number === key.number
@@ -65,12 +78,16 @@ export function legacyThreadPullRequestKey(
 export function threadPullRequestKeysEqual(
   left: ThreadPullRequestKeySource,
   right: ThreadPullRequestKeySource,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile> = [],
 ): boolean {
-  return threadPullRequestKeyOf(left) === threadPullRequestKeyOf(right);
+  return threadPullRequestKeyOf(left, profiles) === threadPullRequestKeyOf(right, profiles);
 }
 
-export function threadPullRequestKeyOf(key: ThreadPullRequestKeySource): string {
-  const normalized = normalizeThreadPullRequestKey(key);
+export function threadPullRequestKeyOf(
+  key: ThreadPullRequestKeySource,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile> = [],
+): string {
+  const normalized = normalizeThreadPullRequestKey(key, profiles);
   return `${normalized.host}/${normalized.repository}#${normalized.number}`;
 }
 

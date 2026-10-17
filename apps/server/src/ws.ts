@@ -1,4 +1,5 @@
-import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
+import { azureDevOpsServerProfiles } from "@t3tools/shared/azureDevOps";
+import { PullRequestOperationError, OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 
@@ -1212,14 +1213,17 @@ const layerWsRpc = (
           Effect.map((id) => CommandId.make(`server:${tag}:${id}`)),
         );
       const resolvePullRequestSyncKey = (reference: PullRequestRef) =>
-        reference.host !== undefined && reference.repository.includes("/")
-          ? Effect.succeed(pullRequestSyncKey(reference))
-          : projectService.getShell(reference.projectId).pipe(
-              Effect.map((project) =>
-                pullRequestSyncKey(reference, Option.getOrUndefined(project)?.repositoryIdentity),
-              ),
-              Effect.orElseSucceed(() => null),
-            );
+        Effect.gen(function* () {
+          const profiles = azureDevOpsServerProfiles(yield* serverSettings.getSettings);
+          if (reference.host !== undefined && reference.repository.includes("/"))
+            return pullRequestSyncKey(reference, undefined, profiles);
+          const project = yield* projectService.getShell(reference.projectId);
+          return pullRequestSyncKey(
+            reference,
+            Option.getOrUndefined(project)?.repositoryIdentity,
+            profiles,
+          );
+        }).pipe(Effect.orElseSucceed(() => null));
       const usage = yield* UsageService.UsageService;
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
@@ -2457,7 +2461,17 @@ const layerWsRpc = (
             Effect.flatMap((key) =>
               key === null
                 ? Effect.succeed({ threads: [] })
-                : listLinkedPullRequestThreads(key).pipe(
+                : serverSettings.getSettings.pipe(
+                    Effect.mapError(
+                      () =>
+                        new PullRequestOperationError({
+                          operation: "linkedThreads",
+                          detail: "Source control settings could not be read.",
+                        }),
+                    ),
+                    Effect.flatMap((settings) =>
+                      listLinkedPullRequestThreads(key, azureDevOpsServerProfiles(settings)),
+                    ),
                     Effect.provideService(SqlClient.SqlClient, sql),
                   ),
             ),

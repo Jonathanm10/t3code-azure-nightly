@@ -1,3 +1,9 @@
+import * as DateTime from "effect/DateTime";
+import * as Schema from "effect/Schema";
+import { AzureDevOpsServerApi } from "./AzureDevOpsServerApi.ts";
+import type { AzureDevOpsPullRequest } from "./azureDevOpsPullRequestJson.ts";
+import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
+import { resolveAzureDevOpsServerAddress } from "@t3tools/shared/azureDevOps";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { SourceControlProviderError, type ChangeRequest } from "@t3tools/contracts";
@@ -234,5 +240,107 @@ export const make = Effect.gen(function* () {
               }),
           ),
         ),
+  });
+});
+
+const isSourceControlError = Schema.is(SourceControlProviderError);
+
+export const makeServer = Effect.gen(function* () {
+  const api = yield* AzureDevOpsServerApi;
+  const asError = (cwd: string, operation: string) => (error: { readonly detail: string }) =>
+    new SourceControlProviderError({
+      provider: SourceControlProviderKind.make("azure-devops-server"),
+      operation,
+      cwd,
+      detail: error.detail,
+    });
+  const unsupported = (input: { cwd: string }, operation: string) =>
+    Effect.fail(
+      new SourceControlProviderError({
+        provider: SourceControlProviderKind.make("azure-devops-server"),
+        operation,
+        cwd: input.cwd,
+        detail: "Azure DevOps Server is read-only in T3. This operation is unavailable.",
+      }),
+    );
+  const context = (input: {
+    cwd: string;
+    context?: SourceControlProvider.SourceControlProviderContext;
+  }) => ({
+    cwd: input.cwd,
+    ...(input.context === undefined ? {} : { remoteUrl: input.context.remoteUrl }),
+  });
+  const summary = (item: AzureDevOpsPullRequest): ChangeRequest => ({
+    provider: SourceControlProviderKind.make("azure-devops-server"),
+    number: item.number,
+    title: item.title,
+    url: item.url,
+    baseRefName: item.baseBranch,
+    headRefName: item.headBranch,
+    state: item.state,
+    isDraft: item.isDraft,
+    updatedAt: DateTime.make(item.updatedAt),
+    closedAt: item.state === "closed" ? item.closedAt : null,
+    mergedAt: item.state === "merged" ? item.closedAt : null,
+    isCrossRepository: false,
+  });
+  return SourceControlProvider.SourceControlProvider.of({
+    kind: SourceControlProviderKind.make("azure-devops-server"),
+    listChangeRequests: (input) =>
+      api
+        .withVerifiedCredential(context(input), (identity) =>
+          api.reader
+            .listPullRequests({
+              cwd: input.cwd,
+              repository: "",
+              state: input.state,
+              involvement: "all",
+              viewer: identity.viewer,
+              limit: input.limit ?? 100,
+              headBranch: SourceControlProvider.sourceBranch(input),
+            })
+            .pipe(Effect.map((page) => page.items.map(summary))),
+        )
+        .pipe(Effect.mapError(asError(input.cwd, "listChangeRequests"))),
+    getChangeRequest: (input) =>
+      api
+        .withVerifiedCredential(context(input), () =>
+          Effect.gen(function* () {
+            const address = yield* api.resolveAddress(context(input));
+            const link = parseChangeRequestUrl(input.reference, [address.profile]);
+            const target = resolveAzureDevOpsServerAddress(input.reference, [address.profile]);
+            const number = /^#?\d+$/u.test(input.reference)
+              ? Number(input.reference.replace(/^#/u, ""))
+              : link?.number;
+            if (
+              !number ||
+              !Number.isSafeInteger(number) ||
+              number < 1 ||
+              (target !== null && target.canonicalKey !== address.canonicalKey) ||
+              (link !== null && target === null)
+            )
+              return yield* new SourceControlProviderError({
+                provider: SourceControlProviderKind.make("azure-devops-server"),
+                operation: "getChangeRequest",
+                cwd: input.cwd,
+                detail:
+                  "The pull request does not belong to this configured Azure DevOps Server repository.",
+              });
+            return summary(yield* api.reader.getPullRequest({ cwd: input.cwd, number }));
+          }),
+        )
+        .pipe(
+          Effect.mapError((error) =>
+            isSourceControlError(error) ? error : asError(input.cwd, "getChangeRequest")(error),
+          ),
+        ),
+    getDefaultBranch: (input) =>
+      api
+        .getDefaultBranch(context(input))
+        .pipe(Effect.mapError(asError(input.cwd, "getDefaultBranch"))),
+    getRepositoryCloneUrls: (input) => unsupported(input, "getRepositoryCloneUrls"),
+    checkoutChangeRequest: (input) => unsupported(input, "checkoutChangeRequest"),
+    createChangeRequest: (input) => unsupported(input, "createChangeRequest"),
+    createRepository: (input) => unsupported(input, "createRepository"),
   });
 });

@@ -1,20 +1,28 @@
-import type { EnvironmentId, PullRequestRef, ScopedThreadRef } from "@t3tools/contracts";
+import { azureDevOpsServerProfiles } from "@t3tools/shared/azureDevOps";
+import type {
+  AzureDevOpsServerProfile,
+  PullRequestRef,
+  ScopedProjectRef,
+  ScopedThreadRef,
+} from "@t3tools/contracts";
+import { resolveAzureDevOpsServerAddress } from "@t3tools/shared/azureDevOps";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate } from "@tanstack/react-router";
 import { type MouseEvent, useCallback, useMemo } from "react";
 
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
+import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 import { parseChangeRequestUrl, type ChangeRequestLink } from "@t3tools/shared/changeRequestUrl";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 
 import { useOpenLink } from "../browser/useOpenLink";
 import { useClientSettings } from "../hooks/useSettings";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
-import { useRightPanelStore } from "../rightPanelStore";
+import { selectSelectedRightPanelSurface, useRightPanelStore } from "../rightPanelStore";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
-import { useProjects } from "../state/entities";
+import { readThreadShell, useProjects, useThreadShell } from "../state/entities";
 import { environmentServerConfigsAtom, serverEnvironment } from "../state/server";
 import { usePrimaryEnvironmentId } from "../state/environments";
 
@@ -30,9 +38,38 @@ export {
 export function findProjectForChangeRequest(
   projects: ReadonlyArray<EnvironmentProject>,
   link: ChangeRequestLink,
+  profilesForEnvironment?: (id: EnvironmentId) => ReadonlyArray<AzureDevOpsServerProfile>,
+  preferredProjectRef?: ScopedProjectRef,
 ): EnvironmentProject | undefined {
+  const preferredProject = preferredProjectRef
+    ? projects.find(
+        (project) =>
+          project.id === preferredProjectRef.projectId &&
+          project.environmentId === preferredProjectRef.environmentId,
+      )
+    : undefined;
+  if (
+    preferredProject &&
+    serverPullRequestReference(
+      preferredProject,
+      link,
+      profilesForEnvironment?.(preferredProject.environmentId) ?? [],
+    ) !== null
+  )
+    return preferredProject;
   return projects.find((project) => {
     const identity = project.repositoryIdentity;
+    if (!identity) return false;
+    const profiles = profilesForEnvironment?.(project.environmentId) ?? [];
+    const server = resolveAzureDevOpsServerAddress(identity.locator.remoteUrl, profiles);
+    if (server !== null)
+      return (
+        server.canonicalKey ===
+        resolveAzureDevOpsServerAddress(
+          `https://${link.authority ?? link.host}/${link.repository}`,
+          profiles,
+        )?.canonicalKey
+      );
     return (
       identity?.provider !== undefined &&
       sourceControlClients.get(identity.provider).isChangeRequestInRepository(identity, link)
@@ -45,23 +82,29 @@ export function resolvePullRequestPreviewTarget({
   projects,
   pullRequestsEnabled,
   url,
+  profiles = [],
+  preferredProject,
 }: {
   environmentId: EnvironmentId | null;
   projects: ReadonlyArray<EnvironmentProject>;
   pullRequestsEnabled: boolean;
   url: string;
+  profiles?: ReadonlyArray<AzureDevOpsServerProfile>;
+  preferredProject?: ScopedProjectRef | undefined;
 }): { environmentId: EnvironmentId; input: PullRequestRef } | null {
   if (!pullRequestsEnabled || environmentId === null) return null;
-  const parsed = parseChangeRequestUrl(url);
+  const parsed = parseChangeRequestUrl(url, profiles);
   if (parsed === null) return null;
   const project = findProjectForChangeRequest(
     projects.filter((candidate) => candidate.environmentId === environmentId),
     parsed,
+    () => profiles,
+    preferredProject,
   );
   if (project === undefined) return null;
   return {
     environmentId,
-    input: {
+    input: serverPullRequestReference(project, parsed, profiles) ?? {
       projectId: project.id,
       host: parsed.authority ?? parsed.host,
       repository: sourceControlRepositorySelector(project.repositoryIdentity) ?? parsed.repository,
@@ -70,9 +113,59 @@ export function resolvePullRequestPreviewTarget({
   };
 }
 
-export function usePullRequestPreviewTarget(environmentId: EnvironmentId | null, url: string) {
+function serverPullRequestReference(
+  project: EnvironmentProject,
+  link: ChangeRequestLink,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile>,
+): PullRequestRef | null {
+  const checkout = resolveAzureDevOpsServerAddress(
+    project.repositoryIdentity?.locator.remoteUrl ?? "",
+    profiles,
+  );
+  const target = resolveAzureDevOpsServerAddress(
+    `https://${link.authority ?? link.host}/${link.repository}`,
+    profiles,
+  );
+  if (checkout === null || target?.canonicalKey !== checkout.canonicalKey) return null;
+  return {
+    projectId: project.id,
+    host: checkout.host,
+    repository: checkout.repository,
+    number: link.number,
+  };
+}
+
+export function usePreferredPullRequestProject(
+  threadRef?: ScopedThreadRef,
+  panelRef?: ScopedThreadRef,
+): ScopedProjectRef | undefined {
+  const threadProjectId = useThreadShell(threadRef ?? null)?.projectId;
+  const resolvedPanelRef = panelRef ?? threadRef;
+  const selectedSurface = useRightPanelStore((state) =>
+    selectSelectedRightPanelSurface(state.byThreadKey, resolvedPanelRef),
+  );
+  return useMemo(() => {
+    if (threadRef && threadProjectId !== undefined)
+      return { environmentId: threadRef.environmentId, projectId: threadProjectId };
+    if (selectedSurface?.kind !== "pull-request") return undefined;
+    const environmentId = selectedSurface.environmentId ?? resolvedPanelRef?.environmentId;
+    return environmentId === undefined
+      ? undefined
+      : {
+          environmentId: EnvironmentId.make(environmentId),
+          projectId: ProjectId.make(selectedSurface.projectId),
+        };
+  }, [resolvedPanelRef, selectedSurface, threadProjectId, threadRef]);
+}
+
+export function usePullRequestPreviewTarget(
+  environmentId: EnvironmentId | null,
+  url: string,
+  threadRef?: ScopedThreadRef,
+) {
   const projects = useProjects();
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
+  const preferredProject = usePreferredPullRequestProject(threadRef);
   return useMemo(
     () =>
       resolvePullRequestPreviewTarget({
@@ -80,16 +173,22 @@ export function usePullRequestPreviewTarget(environmentId: EnvironmentId | null,
         projects,
         pullRequestsEnabled: serverConfig?.environment.capabilities.pullRequests === true,
         url,
+        profiles:
+          serverConfig === null || serverConfig === undefined
+            ? []
+            : azureDevOpsServerProfiles(serverConfig.settings),
+        preferredProject,
       }),
-    [environmentId, projects, serverConfig, url],
+    [environmentId, preferredProject, projects, serverConfig, url],
   );
 }
 
 export function findProjectOnChangeRequestHost(
   projects: ReadonlyArray<EnvironmentProject>,
   link: ChangeRequestLink,
+  profilesForEnvironment?: (id: EnvironmentId) => ReadonlyArray<AzureDevOpsServerProfile>,
 ): EnvironmentProject | undefined {
-  const own = findProjectForChangeRequest(projects, link);
+  const own = findProjectForChangeRequest(projects, link, profilesForEnvironment);
   if (own !== undefined) return own;
   return projects.find((project) => {
     const identity = project.repositoryIdentity;
@@ -139,7 +238,7 @@ export function useOpenChangeRequestLink(
       // Beside a thread the panel reads on that thread's environment, so a project from another
       // one could not be read there whatever its remote says: two environments can hold the same
       // repository, and handing the panel the wrong one's id opens a surface that never loads.
-      const projects = resolvedThreadRef
+      const candidateProjects = resolvedThreadRef
         ? allProjects.filter((project) => project.environmentId === resolvedThreadRef.environmentId)
         : targetEnvironmentId
           ? allProjects.filter((project) => project.environmentId === targetEnvironmentId)
@@ -150,25 +249,61 @@ export function useOpenChangeRequestLink(
                   Number(right.environmentId === primaryEnvironmentId) -
                   Number(left.environmentId === primaryEnvironmentId),
               );
-      const exactProject = findProjectForChangeRequest(projects, parsed);
+      const selectedSurface = selectSelectedRightPanelSurface(
+        useRightPanelStore.getState().byThreadKey,
+        resolvedPanelRef,
+      );
+      const threadProjectId = resolvedThreadRef
+        ? readThreadShell(resolvedThreadRef)?.projectId
+        : undefined;
+      const preferredProjectId =
+        threadProjectId ??
+        (selectedSurface?.kind === "pull-request" ? selectedSurface.projectId : undefined);
+      const preferredEnvironmentId =
+        threadProjectId !== undefined
+          ? resolvedThreadRef?.environmentId
+          : selectedSurface?.kind === "pull-request"
+            ? (selectedSurface.environmentId ?? resolvedPanelRef?.environmentId)
+            : undefined;
+      const profilesForEnvironment = (id: EnvironmentId) =>
+        azureDevOpsServerProfiles(serverConfigs.get(id)?.settings ?? { sourceControlHosts: {} });
+      const exactProject = findProjectForChangeRequest(
+        candidateProjects,
+        parsed,
+        profilesForEnvironment,
+        preferredProjectId !== undefined && preferredEnvironmentId !== undefined
+          ? {
+              projectId: ProjectId.make(preferredProjectId),
+              environmentId: EnvironmentId.make(preferredEnvironmentId),
+            }
+          : undefined,
+      );
       const project =
         exactProject ??
         (resolvedPanelRef
           ? findProjectOnChangeRequestHost(
-              projects.filter(
+              candidateProjects.filter(
                 (candidate) =>
                   serverConfigs.get(candidate.environmentId)?.environment.capabilities
                     .threadPullRequests === true,
               ),
               parsed,
+              profilesForEnvironment,
             )
           : undefined);
       if (project === undefined || !reads(project.environmentId)) return false;
+      const serverReference = serverPullRequestReference(
+        project,
+        parsed,
+        profilesForEnvironment(project.environmentId),
+      );
+      const host = serverReference?.host ?? parsed.authority ?? parsed.host;
       const repository =
-        serverConfigs.get(project.environmentId)?.environment.capabilities.threadPullRequests ===
+        serverReference?.repository ??
+        (serverConfigs.get(project.environmentId)?.environment.capabilities.threadPullRequests ===
         true
           ? parsed.repository
-          : (sourceControlRepositorySelector(project.repositoryIdentity) ?? parsed.repository);
+          : (sourceControlRepositorySelector(project.repositoryIdentity) ?? parsed.repository));
       event.preventDefault();
       event.stopPropagation();
       if (resolvedPanelRef) {
@@ -180,7 +315,7 @@ export function useOpenChangeRequestLink(
           projectId: project.id,
           ...(serverConfigs.get(project.environmentId)?.environment.capabilities
             .threadPullRequests === true
-            ? { host: parsed.authority ?? parsed.host }
+            ? { host }
             : {}),
           repository,
           url: targetUrl,
@@ -195,7 +330,7 @@ export function useOpenChangeRequestLink(
               state: previous.state ?? "all",
               repository,
               number: parsed.number,
-              selectedHost: parsed.authority ?? parsed.host,
+              selectedHost: host,
               selectedProjectId: project.id,
               selectedEnvironmentId: project.environmentId,
             }),
@@ -211,7 +346,7 @@ export function useOpenChangeRequestLink(
           state: "all",
           repository,
           number: parsed.number,
-          selectedHost: parsed.authority ?? parsed.host,
+          selectedHost: host,
           selectedProjectId: project.id,
           selectedEnvironmentId: project.environmentId,
         },

@@ -1,4 +1,5 @@
-import { SourceControlProviderKind } from "@t3tools/contracts";
+import * as Context from "effect/Context";
+import { ProjectId, SourceControlProviderKind } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeV8 from "node:v8";
 import * as NodeVM from "node:vm";
@@ -19,7 +20,6 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import * as TestClock from "effect/testing/TestClock";
 import type {
   OrchestrationProjectShell,
-  ProjectId,
   PullRequestReviewCapabilities,
   PullRequestReviewerCapabilities,
 } from "@t3tools/contracts";
@@ -524,6 +524,7 @@ function fakeProvider(
 }
 
 function makeService(input: {
+  readonly azureProfiles?: ReadonlyArray<import("@t3tools/contracts").AzureDevOpsServerProfile>;
   readonly settings?: ServerSettings;
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
   readonly providers: ReadonlyArray<PullRequestProviderApi>;
@@ -536,7 +537,15 @@ function makeService(input: {
     Layer.build(
       Layer.mergeAll(
         Layer.mock(ServerSettingsService.ServerSettingsService)({
-          getSettings: Effect.succeed(input.settings ?? DEFAULT_SERVER_SETTINGS),
+          getSettings: Effect.sync(
+            () =>
+              input.settings ?? {
+                ...DEFAULT_SERVER_SETTINGS,
+                sourceControlHosts: {
+                  "azure-devops-server": { profiles: input.azureProfiles ?? [] },
+                },
+              },
+          ),
         }),
         Layer.succeed(
           PullRequestProviderRegistry.PullRequestProviderRegistry,
@@ -7712,5 +7721,474 @@ it.effect.each([
         action,
       });
       assert.deepStrictEqual(calls, [expected]);
+    }),
+);
+
+it.effect(
+  "reacquires Server credentials before list/detail cache hits and isolates account changes",
+  () =>
+    Effect.gen(function* () {
+      const profiles = [
+        {
+          apiCollectionUrl: "https://git.example.test/tfs/C",
+          browserCollectionUrl: "https://web.example.test/tfs/C",
+        },
+      ];
+      let account = "11111111-1111-1111-1111-111111111111";
+      let acquisitions = 0;
+      let listReads = 0;
+      let detailReads = 0;
+      const pinned = Context.Reference<string | null>("test/azureAccount", {
+        defaultValue: () => null,
+      });
+      const server = fakeProvider(SourceControlProviderKind.make("azure-devops-server"), {
+        repositoryKey: ({ canonicalKey }) => canonicalKey,
+        withVerifiedCredential: (_input, use) =>
+          Effect.suspend(() => {
+            acquisitions += 1;
+            const identity = {
+              viewer: account,
+              accountId: account,
+              credentialFingerprint: `collection-checkout-${account}`,
+            };
+            return use(identity).pipe(Effect.provideService(pinned, account));
+          }),
+        getViewer: () => Effect.map(pinned, (viewer) => viewer ?? "unexpected"),
+        listChangeRequests: (input) =>
+          Effect.map(pinned, (viewer) => {
+            listReads += 1;
+            assert.strictEqual(input.viewer, viewer);
+            return {
+              items: [
+                {
+                  ...changeRequest(42, "2026-07-02T00:00:00Z"),
+                  author: { login: viewer!, name: "Label", avatarUrl: null },
+                },
+              ],
+              truncated: false,
+              continues: true,
+            };
+          }),
+        getChangeRequest: () =>
+          Effect.map(pinned, (viewer) => {
+            detailReads += 1;
+            return { ...hostedChangeRequest(viewer ?? "unexpected"), number: 42 };
+          }),
+      });
+      const service = yield* makeService({
+        azureProfiles: profiles,
+        projects: [
+          project({
+            id: "server",
+            title: "Server",
+            workspaceRoot: "/server",
+            provider: SourceControlProviderKind.make("unknown"),
+            host: "git.example.test",
+            repository: "tfs/C/P/_git/Repo",
+            remoteUrl: "https://git.example.test/tfs/C/P/_git/Repo",
+          }),
+        ],
+        providers: [
+          server,
+          fakeProvider(SourceControlProviderKind.make("azure-devops"), {
+            getViewer: () => Effect.die("Server must not use the Cloud provider"),
+          }),
+        ],
+      });
+      const listInput = { state: "open" as const, involvement: "authored" as const };
+      const first = yield* service.list(listInput);
+      const again = yield* service.list(listInput);
+      assert.strictEqual(listReads, 1);
+      assert.strictEqual(acquisitions, 2);
+      assert.strictEqual(first.entries[0]?.author?.login, account);
+      assert.deepStrictEqual(first.entries, again.entries);
+      const ref = {
+        projectId: "server" as ProjectId,
+        host: "web.example.test",
+        repository: "tfs/C/P/_git/Repo",
+        number: 42,
+      };
+      const detail = yield* service.detail(ref);
+      yield* service.detail(ref);
+      assert.strictEqual(detail.body, account);
+      assert.strictEqual(detailReads, 1);
+      assert.strictEqual(acquisitions, 4);
+      yield* service.invalidate({ reference: ref });
+      const refreshed = yield* service.detail(ref);
+      assert.strictEqual(refreshed.body, account);
+      assert.strictEqual(detailReads, 2);
+      assert.strictEqual(acquisitions, 5);
+      account = "22222222-2222-2222-2222-222222222222";
+      const next = yield* service.list(listInput);
+      const nextDetail = yield* service.detail(ref);
+      assert.strictEqual(next.entries[0]?.author?.login, account);
+      assert.strictEqual(nextDetail.body, account);
+      assert.strictEqual(listReads, 2);
+      assert.strictEqual(detailReads, 3);
+      assert.strictEqual(acquisitions, 7);
+    }),
+);
+
+it.effect("keeps per-checkout viewers when two Server accounts and collections share a host", () =>
+  Effect.gen(function* () {
+    const profiles = [
+      {
+        apiCollectionUrl: "https://git.example.test/tfs/One",
+        browserCollectionUrl: "https://web.example.test/tfs/One",
+      },
+      { apiCollectionUrl: "https://git.example.test/tfs/Two" },
+    ];
+    const accounts = new Map([
+      ["/one", "guid-one"],
+      ["/two", "guid-two"],
+      ["/one-worktree", "guid-worktree"],
+    ]);
+    const pinned = Context.Reference<ReadonlyMap<string, string>>("test/azureAccounts", {
+      defaultValue: () => new Map(),
+    });
+    const called: string[] = [];
+    const server = fakeProvider(SourceControlProviderKind.make("azure-devops-server"), {
+      repositoryKey: ({ canonicalKey }) => canonicalKey,
+      withVerifiedCredential: (input, use) =>
+        Effect.flatMap(pinned, (current) => {
+          const viewer = accounts.get(input.cwd) ?? "unexpected";
+          return use({
+            viewer,
+            accountId: viewer,
+            credentialFingerprint: `${input.remoteUrl}|${input.cwd}|${viewer}`,
+          }).pipe(Effect.provideService(pinned, new Map([...current, [input.cwd, viewer]])));
+        }),
+      getViewer: (input) => Effect.map(pinned, (current) => current.get(input.cwd) ?? "unexpected"),
+      getChangeRequest: (input) =>
+        Effect.map(pinned, (current) => ({
+          ...hostedChangeRequest(current.get(input.cwd) ?? "unexpected"),
+          number: 42,
+        })),
+      listChangeRequests: (input) =>
+        Effect.map(pinned, (current) => {
+          const viewer = current.get(input.cwd);
+          assert.strictEqual(input.viewer, viewer);
+          called.push(input.cwd);
+          return {
+            items: [
+              {
+                ...changeRequest(42, "2026-07-02T00:00:00Z"),
+                reviewRequestLogins: [viewer ?? "unexpected"],
+              },
+            ],
+            truncated: false,
+            continues: true,
+          };
+        }),
+    });
+    const service = yield* makeService({
+      azureProfiles: profiles,
+      projects: [
+        project({
+          id: "one",
+          title: "One",
+          workspaceRoot: "/one",
+          provider: SourceControlProviderKind.make("unknown"),
+          host: "git.example.test",
+          repository: "tfs/One/P/_git/Repo",
+          remoteUrl: "https://git.example.test/tfs/One/P/_git/Repo",
+        }),
+        project({
+          id: "two",
+          title: "Two",
+          workspaceRoot: "/two",
+          provider: SourceControlProviderKind.make("unknown"),
+          host: "git.example.test",
+          repository: "tfs/Two/P/_git/Repo",
+          remoteUrl: "https://git.example.test/tfs/Two/P/_git/Repo",
+        }),
+        project({
+          id: "worktree",
+          title: "Worktree",
+          workspaceRoot: "/one-worktree",
+          provider: SourceControlProviderKind.make("unknown"),
+          host: "git.example.test",
+          repository: "tfs/One/P/_git/Repo",
+          remoteUrl: "https://git.example.test/tfs/One/P/_git/Repo",
+        }),
+      ],
+      providers: [server],
+    });
+    const listed = yield* service.list({ state: "open", involvement: "reviewing" });
+    assert.strictEqual(listed.entries.length, 3);
+    assert.strictEqual(
+      listed.entries.every((entry) => entry.viewerReviewRequested),
+      true,
+    );
+    assert.deepStrictEqual(called.toSorted(), ["/one", "/one-worktree", "/two"]);
+    assert.strictEqual(Object.keys(listed.viewers).length, 1);
+    assert.strictEqual(
+      Object.keys(listed.viewers).some((key) => key.includes("/one")),
+      false,
+    );
+    for (const host of ["git.example.test", "web.example.test"]) {
+      const detail = yield* service.detail({
+        projectId: ProjectId.make("worktree"),
+        host,
+        repository: "tfs/One/P/_git/Repo",
+        number: 42,
+      });
+      assert.strictEqual(detail.projectId, "worktree");
+      assert.strictEqual(detail.body, "guid-worktree");
+    }
+  }),
+);
+
+it.effect("reads Server viewed-file revisions in the active account and collection", () =>
+  Effect.gen(function* () {
+    const profiles = [
+      { apiCollectionUrl: "https://git.example.test/tfs/One" },
+      { apiCollectionUrl: "https://git.example.test/tfs/Two" },
+    ];
+    const checkout = (collection: string) =>
+      project({
+        id: "server",
+        title: "Server",
+        workspaceRoot: "/server",
+        provider: SourceControlProviderKind.make("unknown"),
+        host: "git.example.test",
+        repository: `tfs/${collection}/P/_git/Repo`,
+        remoteUrl: `https://git.example.test/tfs/${collection}/P/_git/Repo`,
+      });
+    const projects = [checkout("One")];
+    let account = "account-one";
+    let revision = "blob-one";
+    const reads: string[] = [];
+    const pinned = Context.Reference<string | null>("test/viewedServerAccount", {
+      defaultValue: () => null,
+    });
+    const server = fakeProvider(SourceControlProviderKind.make("azure-devops-server"), {
+      repositoryKey: ({ canonicalKey }) => canonicalKey,
+      capabilities: {
+        ...fakeProvider(SourceControlProviderKind.make("azure-devops")).capabilities,
+        viewedFiles: "environment",
+      },
+      withVerifiedCredential: (input, use) =>
+        Effect.suspend(() =>
+          use({
+            viewer: account,
+            accountId: account,
+            credentialFingerprint: `${input.remoteUrl}|${account}`,
+          }).pipe(Effect.provideService(pinned, account)),
+        ),
+      getViewer: () => Effect.map(pinned, (viewer) => viewer ?? "unexpected"),
+      getFileRevisions: () =>
+        Effect.map(pinned, (viewer) => {
+          assert.strictEqual(viewer, account);
+          reads.push(revision);
+          return { revisions: new Map([["src/a.ts", revision]]) };
+        }),
+    });
+    const service = yield* makeService({ azureProfiles: profiles, projects, providers: [server] });
+    const ref = { projectId: ProjectId.make("server"), repository: "Repo", number: 42 };
+    const mark = () =>
+      service.setFilesViewed({ ...ref, files: [{ path: "src/a.ts", viewed: true }] });
+    yield* mark();
+    account = "account-two";
+    revision = "blob-two";
+    assert.deepStrictEqual((yield* service.filesViewed(ref)).files, []);
+    yield* mark();
+    assert.deepStrictEqual(reads, ["blob-one", "blob-two"]);
+    revision = "blob-two-updated";
+    yield* TestClock.adjust("2 minutes");
+    assert.deepStrictEqual((yield* service.filesViewed(ref)).files, [
+      { path: "src/a.ts", state: "dismissed" },
+    ]);
+    assert.deepStrictEqual(reads, ["blob-one", "blob-two", "blob-two-updated"]);
+    projects[0] = checkout("Two");
+    revision = "blob-other-collection";
+    assert.deepStrictEqual((yield* service.filesViewed(ref)).files, []);
+    yield* mark();
+    assert.strictEqual(reads.at(-1), "blob-other-collection");
+    projects[0] = checkout("One");
+    account = "account-one";
+    revision = "blob-one-updated";
+    assert.deepStrictEqual((yield* service.filesViewed(ref)).files, [
+      { path: "src/a.ts", state: "dismissed" },
+    ]);
+    assert.strictEqual(reads.at(-1), "blob-one-updated");
+  }),
+);
+
+it.effect(
+  "keeps Cloud listings available when a configured Server credential cannot be acquired",
+  () =>
+    Effect.gen(function* () {
+      const server = fakeProvider(SourceControlProviderKind.make("azure-devops-server"), {
+        repositoryKey: ({ canonicalKey }) => canonicalKey,
+        withVerifiedCredential: () =>
+          Effect.fail(
+            new PullRequestProviderError({
+              provider: SourceControlProviderKind.make("azure-devops-server"),
+              operation: "authenticate",
+              reason: "unauthenticated",
+              detail: "Git sign-in required.",
+            }),
+          ),
+        getViewer: () =>
+          Effect.die("A failed Server acquisition must not retry within the listing"),
+        listChangeRequests: () =>
+          Effect.die("No Server data may be read without a verified credential"),
+      });
+      const service = yield* makeService({
+        azureProfiles: [{ apiCollectionUrl: "https://git.example.test/C" }],
+        projects: [
+          project({
+            id: "server",
+            title: "Server",
+            workspaceRoot: "/server",
+            provider: SourceControlProviderKind.make("unknown"),
+            host: "git.example.test",
+            repository: "C/P/_git/Repo",
+            remoteUrl: "https://git.example.test/C/P/_git/Repo",
+          }),
+          project({ id: "cloud", title: "Cloud", workspaceRoot: "/cloud", repository: "acme/web" }),
+        ],
+        providers: [
+          server,
+          fakeProvider(SourceControlProviderKind.make("github"), {
+            listChangeRequests: () =>
+              Effect.succeed({
+                items: [changeRequest(1, "2026-07-02T00:00:00Z")],
+                truncated: false,
+                continues: true,
+              }),
+          }),
+        ],
+      });
+      const result = yield* service.list({ state: "open" });
+      assert.strictEqual(result.entries.length, 1);
+      assert.strictEqual(result.entries[0]?.provider, "github");
+      assert.strictEqual(
+        result.providers.find((provider) => provider.kind === "azure-devops-server")?.configured,
+        false,
+      );
+      assert.strictEqual(result.errors.length, 1);
+    }),
+);
+
+it.effect(
+  "verifies Server credentials before every current read boundary and refuses cached reads after removal",
+  () =>
+    Effect.gen(function* () {
+      const profiles = [{ apiCollectionUrl: "https://git.example.test/C" }];
+      const settings = {
+        ...DEFAULT_SERVER_SETTINGS,
+        sourceControlHosts: { "azure-devops-server": { profiles } },
+      };
+      let authorized = true;
+      let acquisitions = 0;
+      const server = fakeProvider(SourceControlProviderKind.make("azure-devops-server"), {
+        repositoryKey: ({ canonicalKey }) => canonicalKey,
+        capabilities: {
+          ...fakeProvider(SourceControlProviderKind.make("azure-devops-server")).capabilities,
+          viewedFiles: "environment",
+        },
+        withVerifiedCredential: (_input, use) =>
+          Effect.gen(function* () {
+            acquisitions++;
+            if (!authorized) return yield* requestFailed;
+            return yield* use({
+              viewer: "actor",
+              accountId: "actor",
+              credentialFingerprint: "private-scope",
+            });
+          }),
+        getChangeRequest: () => Effect.succeed(hostedChangeRequest("private body")),
+        getChangeRequestChecks: () => Effect.succeed(hostedChangeRequest("private body")),
+        getChangeRequestWatchFingerprint: () =>
+          Effect.succeed({ status: "private-status", remarks: "private-remarks" }),
+        getReviewThreadComments: () => Effect.succeed({ comments: [], nextCursor: null }),
+        getDiffFileContents: () =>
+          Effect.succeed({ oldContents: "private before", newContents: "private after" }),
+        getFileRevisions: () => Effect.succeed({ revisions: new Map([["src/a.ts", "revision"]]) }),
+      });
+      const service = yield* makeService({
+        settings,
+        projects: [
+          project({
+            id: "server",
+            title: "Server",
+            workspaceRoot: "/server",
+            provider: SourceControlProviderKind.make("unknown"),
+            host: "git.example.test",
+            repository: "C/P/_git/Repo",
+            remoteUrl: "https://git.example.test/C/P/_git/Repo",
+          }),
+        ],
+        providers: [server],
+        resolveHandle: (input) =>
+          Effect.succeed({ context: input.context ?? null, provider: undefined as never }),
+      });
+      const ref = { projectId: ProjectId.make("server"), repository: "Repo", number: 42 };
+      const reads = [
+        service.checks(ref),
+        service.watchFingerprint(ref),
+        service.threadComments({ ...ref, threadId: "thread", cursor: "cursor" }),
+        service.diffFileContents({
+          ...ref,
+          changeType: "change",
+          oldPath: "src/a.ts",
+          newPath: "src/a.ts",
+        }),
+        service.setFilesViewed({ ...ref, files: [{ path: "src/a.ts", viewed: true }] }),
+      ];
+      for (const read of reads) {
+        authorized = true;
+        yield* read;
+        authorized = false;
+        const result = yield* read.pipe(Effect.result);
+        assert.strictEqual(result._tag, "Failure");
+      }
+      assert.strictEqual(acquisitions, reads.length * 2);
+      settings.sourceControlHosts["azure-devops-server"].profiles = [];
+      const result = yield* service.checks(ref).pipe(Effect.result);
+      assert.strictEqual(result._tag, "Failure");
+      assert.strictEqual(acquisitions, reads.length * 2);
+    }),
+);
+
+it.effect(
+  "does not refine a sibling collection from a configured Server collection on the same host",
+  () =>
+    Effect.gen(function* () {
+      const calls: string[] = [];
+      const profiles = [{ apiCollectionUrl: "https://git.example.test/Configured" }];
+      const service = yield* makeService({
+        azureProfiles: profiles,
+        projects: ["Configured", "Unconfigured"].map((collection) =>
+          project({
+            id: collection,
+            title: collection,
+            workspaceRoot: `/${collection}`,
+            provider: SourceControlProviderKind.make("unknown"),
+            host: "git.example.test",
+            repository: `${collection}/P/_git/Repo`,
+            remoteUrl: `https://git.example.test/${collection}/P/_git/Repo`,
+          }),
+        ),
+        providers: [
+          fakeProvider(SourceControlProviderKind.make("azure-devops-server"), {
+            repositoryKey: ({ canonicalKey }) => canonicalKey,
+            withVerifiedCredential: (input, use) => {
+              calls.push(input.cwd);
+              return use({ viewer: "actor", accountId: "actor", credentialFingerprint: input.cwd });
+            },
+          }),
+        ],
+        resolveHandle: (input) =>
+          Effect.succeed({ context: input.context ?? null, provider: undefined as never }),
+      });
+      const result = yield* service.list({ state: "open" });
+      assert.deepStrictEqual(calls, ["/Configured"]);
+      assert.strictEqual(
+        result.providers.find((provider) => provider.kind === "azure-devops-server")?.projectCount,
+        1,
+      );
     }),
 );

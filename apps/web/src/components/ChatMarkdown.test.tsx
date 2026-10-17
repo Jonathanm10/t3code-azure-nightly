@@ -78,6 +78,7 @@ vi.mock("~/lib/openPullRequestLink", () => ({
   findProjectOnChangeRequestHost: () => undefined,
   parseChangeRequestUrl: () => null,
   resolvePullRequestPreviewTarget: () => null,
+  usePreferredPullRequestProject: () => undefined,
   useOpenChangeRequestLink: () => vi.fn(),
 }));
 

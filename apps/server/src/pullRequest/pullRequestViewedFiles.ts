@@ -127,32 +127,34 @@ const makeFileRevisions = (dependencies: FileRevisionsDependencies) => {
     // Suspended, so a held answer costs the host nothing: a provider is free to do its work as
     // the request is built rather than as the effect is run.
     const fetch = Effect.suspend(() => {
-      const key = fileRevisionsKey(project, ref);
       return read({
         cwd: project.project.workspaceRoot,
         repository: project.repository,
         host: project.host,
         number: ref.number,
         paths,
-      }).pipe(
-        Effect.mapError(toPullRequestError(operation)),
-        Effect.flatMap((answer) => recordFileRevisions(key, paths, answer)),
-      );
+      }).pipe(Effect.mapError(toPullRequestError(operation)));
+    });
+    if (project.api.kind === "azure-devops-server")
+      return Effect.map(fetch, (answer) => answer.revisions);
+    const fetchAndRecord = Effect.suspend(() => {
+      const key = fileRevisionsKey(project, ref);
+      return fetch.pipe(Effect.flatMap((answer) => recordFileRevisions(key, paths, answer)));
     });
     return Effect.flatMap(Clock.currentTimeMillis, (now) => {
       const key = fileRevisionsKey(project, ref);
       const held = heldFileRevisionsFor(key, paths, now);
-      if (held === null) return fetch;
+      if (held === null) return fetchAndRecord;
       if (now - held.at <= Duration.toMillis(FILE_REVISIONS_CACHE_TTL))
         return Effect.succeed(held.revisions);
-      if (freshness === "fresh") return fetch;
+      if (freshness === "fresh") return fetchAndRecord;
       if (refreshingFileRevisions.has(key)) return Effect.succeed(held.revisions);
       // Its own fiber rather than a child: the caller has been answered and is gone before this
       // lands.
       return Effect.sync(() => {
         refreshingFileRevisions.add(key);
         runFork(
-          Effect.ignore(fetch).pipe(
+          Effect.ignore(fetchAndRecord).pipe(
             Effect.ensuring(Effect.sync(() => refreshingFileRevisions.delete(key))),
           ),
         );

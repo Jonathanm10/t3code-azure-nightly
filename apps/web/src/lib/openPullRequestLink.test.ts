@@ -9,9 +9,129 @@ import {
   parseChangeRequestUrl,
   pullRequestCandidateUrlFromReferenceAutolink,
   shouldOpenPullRequestExternally,
+  resolvePullRequestPreviewTarget,
 } from "./openPullRequestLink";
-import { ProjectId, type RepositoryIdentity } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, type RepositoryIdentity } from "@t3tools/contracts";
+import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
+
+describe("Server preview targets", () => {
+  const environmentId = EnvironmentId.make("server-env");
+  const profiles = [
+    {
+      apiCollectionUrl: "https://git.example.test:8443/tfs/C",
+      browserCollectionUrl: "https://web.example.test/tfs/C",
+    },
+  ];
+  const project: EnvironmentProject = {
+    environmentId,
+    id: ProjectId.make("selected-checkout"),
+    title: "Repo",
+    workspaceRoot: "/selected-checkout",
+    repositoryIdentity: {
+      ...repositoryIdentity(
+        "unknown",
+        "git.example.test:8443/tfs/c/p/_git/repo",
+        "https://git.example.test:8443/tfs/C/P/_git/Repo",
+      ),
+      displayName: "tfs/C/P/_git/Repo",
+      name: "Repo",
+    },
+    defaultModelSelection: null,
+    scripts: [],
+    createdAt: "2026-10-17T00:00:00Z",
+    updatedAt: "2026-10-17T00:00:00Z",
+  };
+
+  it.each(["https://web.example.test/tfs/C", "https://git.example.test:8443/tfs/C"])(
+    "uses the list reference for %s",
+    (collection) => {
+      expect(
+        resolvePullRequestPreviewTarget({
+          environmentId,
+          projects: [project],
+          pullRequestsEnabled: true,
+          profiles,
+          url: `${collection}/P/_git/Repo/pullrequest/42`,
+        }),
+      ).toEqual({
+        environmentId,
+        input: {
+          projectId: project.id,
+          host: "git.example.test:8443",
+          repository: "Repo",
+          number: 42,
+        },
+      });
+    },
+  );
+
+  const firstProject = { ...project, id: ProjectId.make("first-checkout") };
+  const preferredProject = { environmentId, projectId: project.id };
+  const preview = (
+    url: string,
+    preference = preferredProject,
+    candidates = [firstProject, project],
+  ) =>
+    resolvePullRequestPreviewTarget({
+      environmentId,
+      projects: candidates,
+      pullRequestsEnabled: true,
+      profiles,
+      url,
+      preferredProject: preference,
+    });
+
+  it.each(["https://web.example.test/tfs/C", "https://git.example.test:8443/tfs/C"])(
+    "prefers the selected checkout for a matching Server repository at %s",
+    (collection) => {
+      expect(preview(`${collection}/P/_git/Repo/pullrequest/42`)?.input.projectId).toBe(project.id);
+    },
+  );
+
+  it("does not apply a project preference from another environment", () => {
+    expect(
+      preview("https://web.example.test/tfs/C/P/_git/Repo/pullrequest/42", {
+        ...preferredProject,
+        environmentId: EnvironmentId.make("another-env"),
+      })?.input.projectId,
+    ).toBe(firstProject.id);
+  });
+
+  it.each([
+    "https://git.example.test:8443/tfs/C/P/_git/Other",
+    "https://git.example.test:8443/tfs/Other/P/_git/Repo",
+    "https://git.example.test:9443/tfs/C/P/_git/Repo",
+  ])("ignores a preferred checkout with a different Server identity: %s", (remoteUrl) => {
+    const otherProject = {
+      ...project,
+      repositoryIdentity: repositoryIdentity(
+        "unknown",
+        remoteUrl.slice("https://".length).toLowerCase(),
+        remoteUrl,
+      ),
+    };
+    expect(
+      preview("https://web.example.test/tfs/C/P/_git/Repo/pullrequest/42", preferredProject, [
+        firstProject,
+        otherProject,
+      ])?.input.projectId,
+    ).toBe(firstProject.id);
+  });
+
+  it("preserves the existing first-checkout order for other providers", () => {
+    const identity = {
+      ...repositoryIdentity("github", "github.com/team/repo", "https://github.com/team/repo.git"),
+      displayName: "team/repo",
+    };
+    expect(
+      preview("https://github.com/team/repo/pull/42", preferredProject, [
+        { ...firstProject, repositoryIdentity: identity },
+        { ...project, repositoryIdentity: identity },
+      ])?.input.projectId,
+    ).toBe(firstProject.id);
+  });
+});
 
 function repositoryIdentity(
   provider: string,
@@ -234,7 +354,17 @@ describe("shouldOpenPullRequestExternally", () => {
 
 describe("findProjectOnChangeRequestHost", () => {
   const project = (id: string, identity: Record<string, unknown>) =>
-    ({ id, repositoryIdentity: identity }) as never;
+    ({
+      id,
+      repositoryIdentity: {
+        locator: {
+          source: "git-remote",
+          remoteName: "origin",
+          remoteUrl: `https://${String(identity.canonicalKey ?? "")}`,
+        },
+        ...identity,
+      },
+    }) as never;
   const frontend = project("frontend", {
     canonicalKey: "github.com/acme/frontend",
     provider: "github",
@@ -362,7 +492,46 @@ describe("findProjectOnChangeRequestHost", () => {
 
 describe("findProjectForChangeRequest", () => {
   const project = (identity: Record<string, unknown>) =>
-    ({ id: "p1", repositoryIdentity: identity }) as never;
+    ({
+      id: "p1",
+      repositoryIdentity: {
+        locator: {
+          source: "git-remote",
+          remoteName: "origin",
+          remoteUrl: `https://${String(identity.canonicalKey ?? "")}`,
+        },
+        ...identity,
+      },
+    }) as never;
+
+  it("resolves configured Server browser aliases before host filtering and recovers unknown identities", () => {
+    const profiles = [
+      {
+        apiCollectionUrl: "https://git.example.test:8443/tfs/C",
+        browserCollectionUrl: "https://web.example.test/tfs/C",
+      },
+    ];
+    const checkout = project(
+      repositoryIdentity(
+        "unknown",
+        "git.example.test:8443/tfs/c/p/_git/repo",
+        "https://git.example.test:8443/tfs/C/P/_git/Repo",
+      ),
+    );
+    const reference = parseChangeRequestUrl(
+      "https://web.example.test/tfs/C/P/_git/Repo/pullrequest/42",
+    )!;
+    expect(findProjectForChangeRequest([checkout], reference)).toBeUndefined();
+    expect(findProjectForChangeRequest([checkout], reference, () => profiles)).toBe(checkout);
+    expect(findProjectOnChangeRequestHost([checkout], reference, () => profiles)).toBe(checkout);
+    expect(
+      findProjectForChangeRequest(
+        [checkout],
+        { ...reference, repository: "tfs/Other/P/_git/Repo" },
+        () => profiles,
+      ),
+    ).toBeUndefined();
+  });
 
   it("matches a nested GitLab group by the whole path below the host", () => {
     const projects = [

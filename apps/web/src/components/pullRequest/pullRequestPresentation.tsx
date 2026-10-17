@@ -369,6 +369,18 @@ export function PullRequestReviewOutcomeBadge({
   );
 }
 
+const actorGuid = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/iu;
+
+export function pullRequestActorPresentation(actor: PullRequestActor | null) {
+  const login = actor?.login ?? "ghost";
+  const name = actor?.name?.trim();
+  const label = name && actorGuid.test(login) ? name : login;
+  return {
+    label,
+    tooltip: name && name !== label ? `${name} (@${login})` : label,
+  };
+}
+
 export function PullRequestActorAvatar({
   actor,
   className,
@@ -376,7 +388,7 @@ export function PullRequestActorAvatar({
   actor: PullRequestActor | null;
   className?: string;
 }) {
-  const login = actor?.login ?? "ghost";
+  const { label } = pullRequestActorPresentation(actor);
   const avatarUrl = actor?.avatarUrl ?? null;
   const [failedAvatarUrl, setFailedAvatarUrl] = useState<string | null>(null);
   return avatarUrl === null || failedAvatarUrl === avatarUrl ? (
@@ -387,7 +399,7 @@ export function PullRequestActorAvatar({
         className,
       )}
     >
-      {login.slice(0, 1).toUpperCase()}
+      {label.slice(0, 1).toUpperCase()}
     </span>
   ) : (
     <img
@@ -414,12 +426,12 @@ export function PullRequestActorLabel({
   tooltip?: boolean;
   profileUrl?: string | null;
 }) {
-  const login = actor?.login ?? "ghost";
+  const presentation = pullRequestActorPresentation(actor);
   const label = (
     <span className={cn("flex min-w-0 items-center", variant === "label" && "gap-1.5")}>
       <PullRequestActorAvatar actor={actor} />
       <span className={variant === "label" ? "truncate font-medium text-foreground" : "sr-only"}>
-        {login}
+        {presentation.label}
       </span>
     </span>
   );
@@ -437,7 +449,7 @@ export function PullRequestActorLabel({
                   href={profileUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  aria-label={`Open ${login}'s profile`}
+                  aria-label={`Open ${presentation.label}'s profile`}
                 />
               }
             />
@@ -449,7 +461,7 @@ export function PullRequestActorLabel({
         {label}
       </TooltipTrigger>
       <TooltipPopup side="top">
-        {actor?.name && actor.name !== login ? `${actor.name} (@${login})` : login}
+        {presentation.tooltip}
         {profileUrl ? " · Open profile" : ""}
       </TooltipPopup>
     </Tooltip>

@@ -1,5 +1,9 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import type { VcsStatusResult } from "@t3tools/contracts";
+import {
+  buildMenuItems as buildMobileMenuItems,
+  resolveQuickAction as resolveMobileQuickAction,
+} from "@t3tools/client-runtime/state/vcs";
 import { assert, describe, it } from "vite-plus/test";
 import {
   buildGitActionProgressStages,
@@ -1243,5 +1247,34 @@ describe("resolveAutoFeatureBranchName", () => {
   it("falls back to feature/update when no preferred name is provided", () => {
     const ref = resolveAutoFeatureBranchName(["main"]);
     assert.equal(ref, "feature/update");
+  });
+});
+
+describe("read-only Server pull request actions", () => {
+  const server = {
+    kind: SourceControlProviderKind.make("azure-devops-server"),
+    name: "Azure DevOps Server",
+    baseUrl: "https://git.example.test/C",
+  };
+  it("disables Create PR on web and mobile and keeps ordinary Git actions", () => {
+    for (const build of [buildMenuItems, buildMobileMenuItems]) {
+      const items = build(
+        status({ sourceControlProvider: server, aheadCount: 1, aheadOfDefaultCount: 1 }),
+        false,
+      );
+      assert.strictEqual(items.find((item) => item.id === "pr")?.disabled, true);
+      assert.strictEqual(items.find((item) => item.id === "push")?.disabled, false);
+    }
+    for (const resolve of [resolveQuickAction, resolveMobileQuickAction]) {
+      assert.strictEqual(
+        resolve(status({ sourceControlProvider: server, aheadCount: 1 }), false).action,
+        "push",
+      );
+      assert.strictEqual(
+        resolve(status({ sourceControlProvider: server, hasWorkingTreeChanges: true }), false)
+          .action,
+        "commit_push",
+      );
+    }
   });
 });

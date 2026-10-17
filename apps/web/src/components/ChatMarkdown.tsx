@@ -1,3 +1,4 @@
+import { azureDevOpsServerProfiles } from "@t3tools/shared/azureDevOps";
 import { MarkdownFindContext, useFindRevealRef } from "./chat/markdownFindContext";
 import {
   buildFileLinkParentSuffixByPath,
@@ -201,6 +202,7 @@ import {
   parseChangeRequestUrl,
   pullRequestCandidateUrlFromReferenceAutolink,
   resolvePullRequestPreviewTarget,
+  usePreferredPullRequestProject,
   useOpenChangeRequestLink,
 } from "~/lib/openPullRequestLink";
 import { useOpenLink } from "../browser/useOpenLink";
@@ -2237,6 +2239,7 @@ const NO_MARKDOWN_EDITORS: ReadonlyArray<EditorId> = [];
 /** The server config fields markdown reads. */
 function markdownServerConfigFields(config: ServerConfig | null) {
   return {
+    azureProfiles: config?.settings.sourceControlHosts["azure-devops-server"],
     pullRequestsEnabled: config?.environment.capabilities.pullRequests === true,
     availableEditors: config?.availableEditors ?? NO_MARKDOWN_EDITORS,
     revealInFileManagerLabel:
@@ -2344,14 +2347,17 @@ function useChatMarkdownState({
   const nextConfigFields = markdownServerConfigFields(serverConfig);
   const [configFields, setConfigFields] = useState(nextConfigFields);
   if (
+    configFields.azureProfiles !== nextConfigFields.azureProfiles ||
     configFields.pullRequestsEnabled !== nextConfigFields.pullRequestsEnabled ||
     configFields.availableEditors !== nextConfigFields.availableEditors ||
     configFields.revealInFileManagerLabel !== nextConfigFields.revealInFileManagerLabel
   ) {
     setConfigFields(nextConfigFields);
   }
-  const { pullRequestsEnabled, availableEditors, revealInFileManagerLabel } = configFields;
+  const { pullRequestsEnabled, availableEditors, revealInFileManagerLabel, azureProfiles } =
+    configFields;
   const projects = useProjects();
+  const preferredProject = usePreferredPullRequestProject(threadRef, pullRequestPanelRef);
   const [preferredEditor] = usePreferredEditor(availableEditors);
   const preferredEditorMenuLabel = openInEditorMenuLabel(preferredEditor);
   const openInPreferredEditor = useOpenInPreferredEditor(environmentId, availableEditors);
@@ -2684,10 +2690,12 @@ function useChatMarkdownState({
       openExternalLinkInPreview,
       openMarkdownMedia,
       projects,
+      preferredProject,
       linkedThreadPullRequestFor,
       resolveThreadPullRequest,
       resolvedTheme,
       pullRequestsEnabled,
+      azureProfiles,
       skills,
       threadRef,
       updateThreadPullRequestLink,
@@ -2716,10 +2724,12 @@ function useChatMarkdownState({
       openExternalLinkInPreview,
       openMarkdownMedia,
       projects,
+      preferredProject,
       linkedThreadPullRequestFor,
       resolveThreadPullRequest,
       resolvedTheme,
       pullRequestsEnabled,
+      azureProfiles,
       skills,
       threadRef,
       updateThreadPullRequestLink,
@@ -2867,9 +2877,11 @@ const CHAT_MARKDOWN_COMPONENTS = {
       linkTargetPreference,
       openExternalLinkInPreview,
       projects,
+      preferredProject,
       linkedThreadPullRequestFor,
       resolveThreadPullRequest,
       pullRequestsEnabled,
+      azureProfiles,
       updateThreadPullRequestLink,
       fileLinkChip,
       renderContextReference,
@@ -2922,6 +2934,10 @@ const CHAT_MARKDOWN_COMPONENTS = {
             projects,
             pullRequestsEnabled,
             url: pullRequestCandidateUrl,
+            profiles: azureDevOpsServerProfiles({
+              sourceControlHosts: { "azure-devops-server": azureProfiles ?? {} },
+            }),
+            preferredProject,
           })
         : null;
       const isSameDocumentLink = href?.startsWith("#") ?? false;

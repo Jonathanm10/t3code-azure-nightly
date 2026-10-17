@@ -1,3 +1,9 @@
+import {
+  azureDevOpsServerProfiles,
+  resolveAzureDevOpsServerAddress,
+} from "@t3tools/shared/azureDevOps";
+import { ServerSettingsService } from "../serverSettings.ts";
+import * as Option from "effect/Option";
 import { siblingPullRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import {
   CommandId,
@@ -150,6 +156,7 @@ export const make = Effect.gen(function* () {
   const pullRequests = yield* PullRequestService.PullRequestService;
   const git = yield* GitManager.GitManager;
   const crypto = yield* Crypto.Crypto;
+  const settings = yield* Effect.serviceOption(ServerSettingsService);
 
   const lastSyncedAt = new Map<string, number>();
   const requested = new Map<string, number>();
@@ -184,10 +191,19 @@ export const make = Effect.gen(function* () {
     const nowMs = DateTime.toEpochMillis(now);
     const nowIso = DateTime.formatIso(now);
 
+    const profiles = Option.isSome(settings)
+      ? azureDevOpsServerProfiles(yield* settings.value.getSettings)
+      : [];
+    const publicKeys = new Map<string, string>();
+    const generations = new Map<string, number | undefined>();
+    const completed = new Set<string>();
     const groups = new Map<string, Array<LinkEntry>>();
     for (const thread of threads) {
       for (const link of visibleThreadPullRequests(thread.pullRequests ?? [])) {
-        const key = threadPullRequestKeyOf(link);
+        const publicKey = threadPullRequestKeyOf(link, profiles);
+        const server = resolveAzureDevOpsServerAddress(link.url, profiles);
+        const key = server === null ? publicKey : `${publicKey}\0${thread.projectId}`;
+        publicKeys.set(key, publicKey);
         const entries = groups.get(key) ?? [];
         entries.push({ thread, link });
         groups.set(key, entries);
@@ -196,7 +212,8 @@ export const make = Effect.gen(function* () {
 
     for (const key of lastSyncedAt.keys()) if (!groups.has(key)) lastSyncedAt.delete(key);
     for (const key of retryStacks) if (!groups.has(key)) retryStacks.delete(key);
-    for (const key of requested.keys()) if (!groups.has(key)) requested.delete(key);
+    for (const key of requested.keys())
+      if (![...publicKeys.values()].includes(key)) requested.delete(key);
 
     const linkedThisSweep = new Set<string>();
     const persistence = yield* Semaphore.make(1);
@@ -270,7 +287,9 @@ export const make = Effect.gen(function* () {
         repository: first.link.repository,
         number: first.link.number,
       };
-      const generation = requested.get(key);
+      const publicKey = publicKeys.get(key)!;
+      if (!generations.has(publicKey)) generations.set(publicKey, requested.get(publicKey));
+      const generation = generations.get(publicKey);
       if (generation !== undefined) yield* pullRequests.invalidate({ reference: ref });
       const summary = yield* pullRequests.summary(ref, { recoverTransientFailure: false });
       const fields = snapshotFieldsOf(summary);
@@ -316,7 +335,7 @@ export const make = Effect.gen(function* () {
       // The host answered, so the cadence clock ticks even if a dispatch below is rejected.
       lastSyncedAt.set(key, nowMs);
       // A refresh requested while the host read was in flight belongs to the next sweep.
-      if (requested.get(key) === generation) requested.delete(key);
+      completed.add(key);
       yield* Effect.forEach(
         entries,
         (entry) =>
@@ -352,7 +371,12 @@ export const make = Effect.gen(function* () {
     yield* Effect.forEach(
       groups,
       ([key, entries]) => {
-        if (!((scope === "all" || requested.has(key)) && isDue(key, entries, nowMs))) {
+        if (
+          !(
+            (scope === "all" || requested.has(publicKeys.get(key)!)) &&
+            (requested.has(publicKeys.get(key)!) || isDue(key, entries, nowMs))
+          )
+        ) {
           return Effect.void;
         }
         const first = entries[0]!;
@@ -371,6 +395,15 @@ export const make = Effect.gen(function* () {
       // GitHub answers them in one request rather than one `gh pr view` apiece.
       { concurrency: 25, discard: true },
     );
+    for (const [publicKey, generation] of generations) {
+      const matching = [...publicKeys].filter(([, value]) => value === publicKey);
+      if (
+        matching.length > 0 &&
+        matching.every(([key]) => completed.has(key)) &&
+        requested.get(publicKey) === generation
+      )
+        requested.delete(publicKey);
+    }
     for (const [reason, { count, key }] of skips) {
       yield* Effect.logWarning("pull request sync skipped", { count, key, reason });
     }
@@ -457,11 +490,18 @@ export const make = Effect.gen(function* () {
   });
 
   const requestSync: PullRequestSyncReactor["Service"]["requestSync"] = (key) =>
-    Effect.suspend(() => {
-      requested.set(threadPullRequestKeyOf(key), ++requestGeneration);
-      if (requestedSweepQueued) return Effect.void;
+    Effect.gen(function* () {
+      const profiles = Option.isSome(settings)
+        ? azureDevOpsServerProfiles(
+            yield* settings.value.getSettings.pipe(
+              Effect.orElseSucceed(() => ({ sourceControlHosts: {} })),
+            ),
+          )
+        : [];
+      requested.set(threadPullRequestKeyOf(key, profiles), ++requestGeneration);
+      if (requestedSweepQueued) return;
       requestedSweepQueued = true;
-      return worker.enqueue("requested");
+      return yield* worker.enqueue("requested");
     });
 
   return { start, drain: worker.drain, requestSync } satisfies PullRequestSyncReactor["Service"];

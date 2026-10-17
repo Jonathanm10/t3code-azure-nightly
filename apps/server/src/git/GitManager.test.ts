@@ -31,6 +31,7 @@ import type {
   GitManagerServiceError,
   GitPreparePullRequestThreadInput,
   ModelSelection,
+  SourceControlProviderInfo,
 } from "@t3tools/contracts";
 
 import {
@@ -713,6 +714,7 @@ function preparePullRequestThread(
 function makeManager(input?: {
   ghScenario?: FakeGhScenario;
   sourceControlProvider?: SourceControlProvider["Service"];
+  sourceControlProviderInfo?: SourceControlProviderInfo;
   textGeneration?: Partial<FakeGitTextGeneration>;
   serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   setupScriptRunner?: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"];
@@ -810,7 +812,18 @@ function makeManager(input?: {
         SourceControlProviderRegistry.SourceControlProviderRegistry.of({
           resolveLink: (input) => provider.resolveLink?.(input),
           get: () => Effect.succeed(provider),
-          resolveHandle: () => Effect.succeed({ provider, context: null }),
+          resolveHandle: () =>
+            Effect.succeed({
+              provider,
+              context:
+                input?.sourceControlProviderInfo === undefined
+                  ? null
+                  : {
+                      provider: input.sourceControlProviderInfo,
+                      remoteName: "origin",
+                      remoteUrl: "https://git.example.test/C/P/_git/Repo",
+                    },
+            }),
           resolve: () => Effect.succeed(provider),
           discover: Effect.succeed([]),
         }),
@@ -3479,6 +3492,59 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
 
       const second = yield* manager.status({ cwd: repoDir });
       expect(second.pr?.number).toBe(217);
+    }),
+  );
+
+  it.effect("refuses read-only Server PR actions before committing or pushing", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-server-readonly-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["remote", "add", "origin", "https://git.example.test/C/P/_git/Repo"]);
+      yield* runGit(repoDir, ["switch", "-c", "feature/server"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "README.md"), "uncommitted changes\n");
+      const original = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      const forbidden = () =>
+        Effect.die("Server must refuse PR actions before any remote operation");
+      const provider: SourceControlProvider["Service"] = {
+        kind: SourceControlProviderKind.make("azure-devops-server"),
+        listChangeRequests: () => Effect.succeed([]),
+        getDefaultBranch: () => Effect.succeed("main"),
+        getChangeRequest: forbidden,
+        createChangeRequest: forbidden,
+        getRepositoryCloneUrls: forbidden,
+        createRepository: forbidden,
+        checkoutChangeRequest: forbidden,
+      };
+      const { manager } = yield* makeManager({
+        sourceControlProvider: provider,
+        sourceControlProviderInfo: {
+          kind: SourceControlProviderKind.make("azure-devops-server"),
+          name: "Azure DevOps Server",
+          baseUrl: "https://git.example.test/C",
+        },
+      });
+      for (const action of ["commit_push_pr", "create_pr"] as const) {
+        const failure = yield* runStackedAction(manager, { cwd: repoDir, action }).pipe(
+          Effect.flip,
+        );
+        expect(failure.message).toContain("read-only");
+        expect((yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim()).toBe(original);
+      }
+      expect((yield* runGit(repoDir, ["status", "--porcelain"])).stdout).toContain("README.md");
+      const committed = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "commit",
+        commitMessage: "Commit on a Server repository",
+      });
+      expect(committed.commit.status).toBe("created");
+      const remote = yield* createBareRemote();
+      yield* runGit(repoDir, ["config", "remote.origin.pushurl", remote]);
+      const pushed = yield* runStackedAction(manager, { cwd: repoDir, action: "push" });
+      expect(pushed.push.status).toBe("pushed");
+      expect(pushed.toast.cta.kind).toBe("none");
+      expect(
+        (yield* runGit(remote, ["rev-parse", "refs/heads/feature/server"])).stdout.trim(),
+      ).toBe((yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim());
     }),
   );
 

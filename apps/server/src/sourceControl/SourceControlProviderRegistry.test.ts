@@ -1,3 +1,4 @@
+import * as AzureDevOpsServerApi from "@t3tools/source-control-azure-devops/server/AzureDevOpsServerApi";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -131,10 +132,27 @@ function makeRegistry(input: {
         ),
         Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({}),
         Layer.mock(AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli)({}),
+        Layer.mock(AzureDevOpsServerApi.AzureDevOpsServerApi)({
+          reader: {
+            getViewer: () => Effect.die("Unexpected Server read"),
+            listPullRequests: () => Effect.die("Unexpected Server read"),
+            getPullRequest: () => Effect.die("Unexpected Server read"),
+            listThreads: () => Effect.die("Unexpected Server read"),
+            listIterations: () => Effect.die("Unexpected Server read"),
+            listIterationChanges: () => Effect.die("Unexpected Server read"),
+            readItemContent: () => Effect.die("Unexpected Server read"),
+            runPullRequestAction: () => Effect.die("Unexpected Server read"),
+            updatePullRequest: () => Effect.die("Unexpected Server read"),
+            setPullRequestReviewers: () => Effect.die("Unexpected Server read"),
+          },
+        }),
         Layer.mock(BitbucketApi.BitbucketApi)({}),
         Layer.mock(BitbucketPullRequestApi.BitbucketPullRequestApi)({}),
         input.settings
-          ? Layer.mock(ServerSettings.ServerSettingsService)(input.settings)
+          ? Layer.mock(ServerSettings.ServerSettingsService)({
+              getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+              ...input.settings,
+            })
           : ServerSettings.ServerSettingsService.layerTest(),
         Layer.mock(GitHubPullRequestApi.GitHubPullRequestApi)({}),
         // The GitHub provider's GraphQL reads go through these; no test here makes one.
@@ -624,4 +642,49 @@ it.effect("asks again once Settings change", () =>
     yield* Deferred.await(handled);
     assert.strictEqual((yield* resolveUnknown(registry, "c")).provider.kind, "github");
   }),
+);
+
+it.effect(
+  "revalidates cached and explicit Server contexts after profile removal without claiming a sibling collection",
+  () =>
+    Effect.gen(function* () {
+      let profiles = [{ apiCollectionUrl: "https://git.example.test/C" }];
+      const url = "https://git.example.test/C/P/_git/R";
+      const registry = yield* makeRegistry({
+        remotes: [{ name: "origin", url }],
+        settings: {
+          getSettings: Effect.sync(() => ({
+            ...DEFAULT_SERVER_SETTINGS,
+            sourceControlHosts: { "azure-devops-server": { profiles } },
+          })),
+          subscribeChanges: Effect.succeed(Stream.empty),
+        },
+      });
+      const selected = yield* registry.resolveHandle({ cwd: "/repo" });
+      assert.strictEqual(selected.provider.kind, "azure-devops-server");
+      assert.strictEqual(selected.context?.remoteUrl, url);
+      const sibling = yield* registry.resolveHandle({
+        cwd: "/sibling",
+        context: {
+          provider: {
+            kind: SourceControlProviderKind.make("unknown"),
+            name: "git.example.test",
+            baseUrl: "https://git.example.test",
+          },
+          remoteName: "origin",
+          remoteUrl: "https://git.example.test/Sibling/P/_git/R",
+        },
+      });
+      assert.strictEqual(sibling.provider.kind, "unknown");
+      profiles = [];
+      assert.strictEqual(
+        (yield* registry.resolveHandle({ cwd: "/repo" })).provider.kind,
+        "unknown",
+      );
+      assert.ok(selected.context);
+      assert.strictEqual(
+        (yield* registry.resolveHandle({ cwd: "/repo", context: selected.context })).provider.kind,
+        "unknown",
+      );
+    }),
 );

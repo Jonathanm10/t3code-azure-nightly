@@ -1,5 +1,16 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
-import type { RepositoryIdentity, SourceControlProviderInfo } from "@t3tools/contracts";
+import type {
+  RepositoryIdentity,
+  SourceControlProviderInfo,
+  AzureDevOpsServerProfile,
+} from "@t3tools/contracts";
+import { resolveAzureDevOpsServerAddress } from "./azureDevOps.ts";
+
+export function canCreateChangeRequest(
+  provider: SourceControlProviderInfo | null | undefined,
+): boolean {
+  return provider?.kind !== "azure-devops-server";
+}
 
 export interface ChangeRequestPresentation {
   readonly icon:
@@ -68,6 +79,16 @@ const AZURE_DEVOPS_CHANGE_REQUEST_PRESENTATION: ChangeRequestPresentation = {
   urlExample: "https://dev.azure.com/org/project/_git/repo/pullrequest/42",
 };
 
+const AZURE_DEVOPS_SERVER_CHANGE_REQUEST_PRESENTATION: ChangeRequestPresentation = {
+  icon: "azure-devops",
+  providerName: "Azure DevOps Server",
+  shortName: "PR",
+  longName: "pull request",
+  pluralLongName: "pull requests",
+  providerLongName: "Azure DevOps Server pull request",
+  urlExample: "https://git.example.com/Collection/Project/_git/Repo/pullrequest/42",
+};
+
 const BITBUCKET_CHANGE_REQUEST_PRESENTATION: ChangeRequestPresentation = {
   icon: "bitbucket",
   providerName: "Bitbucket",
@@ -110,6 +131,8 @@ export function resolveChangeRequestPresentation(
       return GITLAB_CHANGE_REQUEST_PRESENTATION;
     case "forgejo":
       return FORGEJO_CHANGE_REQUEST_PRESENTATION;
+    case "azure-devops-server":
+      return AZURE_DEVOPS_SERVER_CHANGE_REQUEST_PRESENTATION;
     case "azure-devops":
       return AZURE_DEVOPS_CHANGE_REQUEST_PRESENTATION;
     case "bitbucket":
@@ -209,7 +232,15 @@ function isBitbucketHost(host: string): boolean {
 
 export function detectSourceControlProviderFromRemoteUrl(
   remoteUrl: string,
+  profiles: ReadonlyArray<AzureDevOpsServerProfile> = [],
 ): SourceControlProviderInfo | null {
+  const server = resolveAzureDevOpsServerAddress(remoteUrl, profiles);
+  if (server !== null)
+    return {
+      kind: SourceControlProviderKind.make("azure-devops-server"),
+      name: "Azure DevOps Server",
+      baseUrl: server.apiCollectionUrl,
+    };
   const host = parseRemoteHost(remoteUrl);
   if (!host) {
     return null;
@@ -290,7 +321,7 @@ export function sourceControlRepositorySelector(
     | undefined,
 ): string | null {
   if (!identity) return null;
-  if (identity.provider === "azure-devops") {
+  if (identity.provider === "azure-devops" || identity.provider === "azure-devops-server") {
     const segments = (identity.displayName ?? "").split("/").filter((part) => part !== "_git");
     return identity.name || segments.at(-1) || null;
   }
