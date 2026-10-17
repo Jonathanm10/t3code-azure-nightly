@@ -39,8 +39,13 @@ function run(command, args, options = {}) {
       timeout: 30 * 60_000,
       ...options,
     });
-  } catch {
-    throw new Error(`Trusted release command failed: ${NodePath.basename(command)}`);
+  } catch (error) {
+    const diagnostic =
+      command === "/usr/bin/codesign"
+        ? ` ${JSON.stringify({ status: error?.status ?? null, stderr: String(error?.stderr ?? "").slice(0, 4096) })}`
+        : "";
+    // oxlint-disable-next-line preserve-caught-error -- Subprocess causes can expose signing inputs and arguments.
+    throw new Error(`Trusted release command failed: ${NodePath.basename(command)}${diagnostic}`);
   }
 }
 const provenance = JSON.parse(
