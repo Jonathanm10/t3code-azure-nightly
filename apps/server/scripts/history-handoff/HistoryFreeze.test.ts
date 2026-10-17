@@ -9,6 +9,7 @@ import {
   EventId,
   MessageId,
   NodeId,
+  type OrchestrationV2ContextTransfer,
   type OrchestrationV2ThreadProjection,
   RunId,
   ThreadId,
@@ -832,6 +833,108 @@ it.effect("refuses an orphan delegated child with its actual missing parent ID",
   }).pipe(Effect.provide(layerFixture)),
 );
 
+it.effect("preserves a delivered original delegation across later runs and repeated freeze", () =>
+  Effect.gen(function* () {
+    const fixture = yield* seed();
+    const sink = yield* EventSink.EventSinkV2;
+    const store = yield* EventStore.EventStoreV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+    const parent = yield* projections.getThreadProjection(fixture.parent.id);
+    const child = yield* projections.getThreadProjection(fixture.child.id);
+    const task = parent.subagents.find((task) => task.id === "delegated");
+    const taggedRun = child.runs[0];
+    assert.isDefined(task);
+    assert.isDefined(taggedRun);
+    if (task === undefined || taggedRun === undefined) return;
+    const { delegatedTaskId: _taskId, ...originalRun } = taggedRun;
+    const deliveredTask = {
+      ...task,
+      status: "completed" as const,
+      result: "Original result already acknowledged by the parent",
+      completionDelivery: { state: "acknowledged" as const, observedByRunId: task.runId },
+      completedAt: now,
+    };
+    const transfer: OrchestrationV2ContextTransfer = {
+      id: ContextTransferId.make("original-delivered-transfer"),
+      type: "subagent_result",
+      sourceThreadId: child.thread.id,
+      targetThreadId: parent.thread.id,
+      sourcePoint: { threadId: child.thread.id, runId: originalRun.id },
+      basePoint: null,
+      sourceProviderInstanceId: originalRun.providerInstanceId,
+      targetProviderInstanceId: parent.thread.providerInstanceId,
+      targetRunId: task.runId,
+      status: "consumed",
+      resolution: null,
+      createdBy: "system",
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+      consumedAt: now,
+    };
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("original-result-task"),
+          threadId: parent.thread.id,
+          occurredAt: now,
+          type: "subagent.updated",
+          payload: deliveredTask,
+        },
+        {
+          id: EventId.make("original-result-transfer"),
+          threadId: parent.thread.id,
+          occurredAt: now,
+          type: "context-transfer.created",
+          payload: transfer,
+        },
+        ...Array.from({ length: 17 }, (_, index) => ({
+          id: EventId.make(`original-result-run:${index}`),
+          threadId: child.thread.id,
+          occurredAt: now,
+          type: "run.updated" as const,
+          payload: {
+            ...originalRun,
+            id: index === 0 ? originalRun.id : RunId.make(`later-child-run:${index}`),
+            ordinal: index + 1,
+            status: "completed" as const,
+            completedAt: now,
+          },
+        })),
+      ],
+    });
+    const sourceHead = yield* store.latestApplicationSequence;
+    const sourcePrefix = yield* prefix(sourceHead);
+    const sourceRuns = (yield* projections.getThreadProjection(child.thread.id)).runs;
+    const operation = {
+      operationId: "original-delivered",
+      frozenAt,
+      expectedApplicationSequence: sourceHead,
+    };
+    yield* freeze(operation);
+    const frozenHead = yield* store.latestApplicationSequence;
+    for (let pass = 0; pass < 2; pass++) {
+      assert.isTrue((yield* maintenance.rebuild).valid);
+      yield* freeze(operation);
+      yield* assertHistoryInert(frozenAt);
+      const frozenParent = yield* projections.getThreadProjection(parent.thread.id);
+      const frozenChild = yield* projections.getThreadProjection(child.thread.id);
+      assert.deepEqual(
+        frozenParent.subagents.find((entry) => entry.id === task.id),
+        deliveredTask,
+      );
+      assert.deepEqual(
+        frozenParent.contextTransfers.filter((entry) => entry.type === "subagent_result"),
+        [transfer],
+      );
+      assert.deepEqual(frozenChild.runs, sourceRuns);
+      assert.equal(yield* store.latestApplicationSequence, frozenHead);
+      assert.deepEqual(yield* prefix(sourceHead), sourcePrefix);
+    }
+  }).pipe(Effect.provide(layerFixture)),
+);
+
 it.effect("rejects ambiguous result linkage without inventing results", () =>
   Effect.gen(function* () {
     const fixture = yield* seed();
@@ -853,7 +956,47 @@ it.effect("rejects ambiguous result linkage without inventing results", () =>
     const run = child.runs[0];
     assert.isDefined(run);
     if (run === undefined) return;
-    const variants = [
+    const { delegatedTaskId: _taskId, ...originalRun } = run;
+    for (const status of ["completed", "interrupted"] as const) {
+      for (const count of [1, 2, 3, 4, 17]) {
+        const deliveredParent = { ...parent, subagents: [{ ...task, status }] };
+        const historicalChild = {
+          ...child,
+          runs: Array.from({ length: count }, (_, index) => ({
+            ...originalRun,
+            id: index === 0 ? originalRun.id : RunId.make(`historical:${index}`),
+            ordinal: index + 1,
+            status,
+          })),
+        };
+        assert.deepEqual(
+          planDelegatedResult({
+            operationId: "existing-result",
+            frozenAt,
+            parent: deliveredParent,
+            child: historicalChild,
+          }),
+          [],
+        );
+      }
+    }
+    assert.deepEqual(
+      planDelegatedResult({
+        operationId: "existing-tagged-result",
+        frozenAt,
+        parent,
+        child: {
+          ...child,
+          runs: [run, { ...originalRun, id: RunId.make("later-untagged-run"), ordinal: 2 }],
+        },
+      }),
+      [],
+    );
+    const variants: ReadonlyArray<{
+      parent: OrchestrationV2ThreadProjection;
+      child: OrchestrationV2ThreadProjection;
+      reason: string;
+    }> = [
       {
         parent: { ...parent, contextTransfers: [] },
         child,
@@ -888,9 +1031,138 @@ it.effect("rejects ambiguous result linkage without inventing results", () =>
         reason: "inconsistent-delegated-transfer",
       },
       {
-        parent,
+        parent: { ...parent, subagents: [{ ...task, result: null }], contextTransfers: [] },
         child: { ...child, runs: [run, { ...run, id: RunId.make("second-run"), ordinal: 2 }] },
         reason: "ambiguous-delegated-runs",
+      },
+      {
+        parent: { ...parent, subagents: [{ ...task, result: null }], contextTransfers: [] },
+        child: { ...child, runs: [originalRun] },
+        reason: "ambiguous-delegated-runs",
+      },
+      {
+        parent,
+        child: {
+          ...child,
+          runs: [run, { ...run, id: RunId.make("second-tagged-run"), ordinal: 2 }],
+        },
+        reason: "ambiguous-delegated-runs",
+      },
+      {
+        parent,
+        child: {
+          ...child,
+          runs: [originalRun, { ...run, id: RunId.make("different-tagged-run"), ordinal: 2 }],
+        },
+        reason: "inconsistent-delegated-transfer",
+      },
+      {
+        parent,
+        child: { ...child, runs: [originalRun, originalRun] },
+        reason: "inconsistent-delegated-transfer",
+      },
+      {
+        parent,
+        child: { ...child, runs: [{ ...run, delegatedTaskId: NodeId.make("other-task") }] },
+        reason: "inconsistent-delegated-transfer",
+      },
+      {
+        parent: { ...parent, subagents: [{ ...task, status: "running" }] },
+        child,
+        reason: "nonterminal-delegated-task",
+      },
+      {
+        parent,
+        child: { ...child, runs: [{ ...run, status: "running" }] },
+        reason: "nonterminal-delegated-run",
+      },
+      {
+        parent,
+        child: {
+          ...child,
+          runs: [
+            originalRun,
+            { ...originalRun, id: RunId.make("active-followup"), status: "queued" },
+          ],
+        },
+        reason: "nonterminal-delegated-run",
+      },
+      {
+        parent,
+        child: { ...child, runs: [{ ...run, restartContinuationOfRunId: RunId.make("earlier") }] },
+        reason: "delegated-restart-chain",
+      },
+      {
+        parent,
+        child: {
+          ...child,
+          runs: [
+            originalRun,
+            { ...originalRun, id: RunId.make("restart"), restartContinuationOfRunId: run.id },
+          ],
+        },
+        reason: "delegated-restart-chain",
+      },
+      {
+        parent: {
+          ...parent,
+          contextTransfers: [
+            transfer,
+            { ...transfer, id: ContextTransferId.make("second-transfer") },
+          ],
+        },
+        child,
+        reason: "delegated-transfer-without-result",
+      },
+      {
+        parent: { ...parent, contextTransfers: [{ ...transfer, status: "superseded" }] },
+        child,
+        reason: "inconsistent-delegated-transfer",
+      },
+      {
+        parent: {
+          ...parent,
+          contextTransfers: [{ ...transfer, targetThreadId: ThreadId.make("wrong-target") }],
+        },
+        child,
+        reason: "inconsistent-delegated-transfer",
+      },
+      {
+        parent: {
+          ...parent,
+          contextTransfers: [{ ...transfer, sourcePoint: { threadId: child.thread.id } }],
+        },
+        child,
+        reason: "inconsistent-delegated-transfer",
+      },
+      {
+        parent: {
+          ...parent,
+          contextTransfers: [
+            {
+              ...transfer,
+              sourcePoint: { threadId: ThreadId.make("wrong-source"), runId: run.id },
+            },
+          ],
+        },
+        child,
+        reason: "inconsistent-delegated-transfer",
+      },
+      {
+        parent: { ...parent, subagents: [{ ...task, threadId: ThreadId.make("wrong-owner") }] },
+        child,
+        reason: "inconsistent-delegated-task",
+      },
+      {
+        parent,
+        child: {
+          ...child,
+          thread: {
+            ...child.thread,
+            lineage: { ...child.thread.lineage, relationshipToParent: "fork" },
+          },
+        },
+        reason: "inconsistent-delegated-lineage",
       },
     ];
     for (const variant of variants)

@@ -363,6 +363,7 @@ export function planDelegatedResult(input: {
     throw new HistoryFreezeRefused({ reason, entityId: child.thread.id });
   };
   if (
+    child.thread.lineage.relationshipToParent !== "subagent" ||
     child.thread.lineage.parentThreadId !== parent.thread.id ||
     child.thread.forkedFrom?.type !== "node"
   ) {
@@ -373,33 +374,61 @@ export function planDelegatedResult(input: {
   );
   if (tasks.length !== 1) return refuse("ambiguous-delegated-generations");
   const task = tasks[0];
-  if (task === undefined || task.id !== child.thread.forkedFrom.nodeId)
+  if (
+    task === undefined ||
+    task.threadId !== parent.thread.id ||
+    task.id !== child.thread.forkedFrom.nodeId
+  )
     return refuse("inconsistent-delegated-task");
-  const runs = child.runs.filter((run) => run.delegatedTaskId === task.id);
-  if (runs.length !== 1) return refuse("ambiguous-delegated-runs");
+  const transfers = parent.contextTransfers.filter(
+    (transfer) =>
+      transfer.type === "subagent_result" && transfer.sourceThreadId === child.thread.id,
+  );
+  const existingTransfer =
+    task.result !== null && transfers.length === 1 ? transfers[0] : undefined;
+  const taskRuns = child.runs.filter((run) => run.delegatedTaskId === task.id);
+  if (taskRuns.length > 1) return refuse("ambiguous-delegated-runs");
+  const runs =
+    existingTransfer === undefined
+      ? taskRuns
+      : child.runs.filter((run) => run.id === existingTransfer.sourcePoint.runId);
+  if (runs.length !== 1)
+    return refuse(
+      existingTransfer === undefined
+        ? "ambiguous-delegated-runs"
+        : "inconsistent-delegated-transfer",
+    );
   const run = runs[0];
-  if (run === undefined || activeRun(run)) return refuse("nonterminal-delegated-run");
+  if (
+    run === undefined ||
+    activeRun(run) ||
+    (existingTransfer !== undefined && child.runs.some(activeRun))
+  )
+    return refuse("nonterminal-delegated-run");
+  if (existingTransfer !== undefined && openWork(task.status))
+    return refuse("nonterminal-delegated-task");
   if (
     run.restartContinuationOfRunId !== undefined ||
     child.runs.some((candidate) => candidate.restartContinuationOfRunId === run.id)
   ) {
     return refuse("delegated-restart-chain");
   }
-  const transfers = parent.contextTransfers.filter(
-    (transfer) =>
-      transfer.type === "subagent_result" && transfer.sourceThreadId === child.thread.id,
-  );
   if (
     transfers.some(
       (transfer) =>
         transfer.targetThreadId !== parent.thread.id ||
         transfer.sourcePoint.threadId !== child.thread.id ||
         transfer.sourcePoint.runId !== run.id,
-    )
+    ) ||
+    (existingTransfer !== undefined &&
+      (existingTransfer.status !== "consumed" ||
+        run.threadId !== child.thread.id ||
+        (taskRuns[0] !== undefined && taskRuns[0].id !== run.id) ||
+        (run.delegatedTaskId !== undefined && run.delegatedTaskId !== task.id)))
   ) {
     return refuse("inconsistent-delegated-transfer");
   }
-  if (task.result !== null && transfers.length === 1) return [];
+  if (existingTransfer !== undefined) return [];
   if (transfers.length !== 0) return refuse("delegated-transfer-without-result");
   if (task.result !== null) return refuse("delegated-result-without-transfer");
   if (task.completionDelivery?.state !== "disposed")
