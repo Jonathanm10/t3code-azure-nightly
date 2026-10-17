@@ -2,11 +2,13 @@ import * as NodeTest from "node:test";
 import * as NodeAssert from "node:assert/strict";
 
 NodeTest.test(
-  "integration versions follow the concrete Nightly tag instead of placeholder manifests",
+  "integration uses the official Nightly source and versions from its concrete tag",
   async (t) => {
     const sourceSha = "a".repeat(40);
     const upstreamSha = "b".repeat(40);
     const writes = new Map();
+    const gitFetches = [];
+    const releaseRequests = [];
     t.mock.module("node:fs", {
       namedExports: {
         readFileSync: () => JSON.stringify({ version: "0.1.0" }),
@@ -18,6 +20,7 @@ NodeTest.test(
       namedExports: {
         execFileSync: (command, args) => {
           NodeAssert.equal(command, "git");
+          if (args.includes("fetch")) gitFetches.push(args.slice(2));
           return args.includes("FETCH_HEAD^{commit}") ? upstreamSha : sourceSha;
         },
       },
@@ -37,16 +40,30 @@ NodeTest.test(
     t.mock.method(globalThis, "fetch", async (input) => {
       const url = new URL(input);
       NodeAssert.equal(url.hostname, "api.github.com");
-      return Response.json(
-        url.pathname === "/repos/t3tools/t3code/releases"
-          ? [{ id: 1, tag_name: "v0.1.1-nightly.20261017.9000", draft: false, prerelease: true }]
-          : [],
-      );
+      releaseRequests.push(url.pathname);
+      if (url.pathname === "/repos/pingdotgg/t3code/releases")
+        return Response.json([
+          { id: 1, tag_name: "v0.1.1-nightly.20261017.9000", draft: false, prerelease: true },
+        ]);
+      if (url.pathname === "/repos/fixture/fork/releases") return Response.json([]);
+      return Response.json({ message: "Not Found" }, { status: 404 });
     });
     await import("./integrate.mjs?fixture=upstream-tag");
     const provenance = JSON.parse([...writes.values()][0]);
     NodeAssert.match(provenance.version, /^0\.1\.1-nightly\.\d{8}\.1$/);
     NodeAssert.equal(provenance.upstreamTag, "v0.1.1-nightly.20261017.9000");
     NodeAssert.equal(provenance.sourceSha, sourceSha);
+    NodeAssert.deepEqual(releaseRequests, [
+      "/repos/pingdotgg/t3code/releases",
+      "/repos/fixture/fork/releases",
+    ]);
+    NodeAssert.deepEqual(gitFetches, [
+      [
+        "fetch",
+        "--no-tags",
+        "https://github.com/pingdotgg/t3code.git",
+        "refs/tags/v0.1.1-nightly.20261017.9000",
+      ],
+    ]);
   },
 );
