@@ -49,6 +49,19 @@ function run(command, args, options = {}) {
     throw new Error(`Trusted release command failed: ${NodePath.basename(command)}${diagnostic}`);
   }
 }
+function staple(target) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      run("/usr/bin/xcrun", ["stapler", "staple", target]);
+      break;
+    } catch (error) {
+      // Apple's ticket service drops hosted-runner connections after notarization is accepted.
+      if (attempt === 5 || !String(error?.message).includes("NSURLErrorDomain")) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, attempt * 15_000);
+    }
+  }
+  run("/usr/bin/xcrun", ["stapler", "validate", target]);
+}
 const provenance = JSON.parse(
   NodeFS.readFileSync(NodePath.join(input, "azure-nightly-provenance.json"), "utf8"),
 );
@@ -216,8 +229,7 @@ try {
   );
   if (notarization.status !== "Accepted") throw new Error("Apple did not accept notarization.");
   console.info(JSON.stringify({ notarizationId: notarization.id, status: notarization.status }));
-  run("/usr/bin/xcrun", ["stapler", "staple", app]);
-  run("/usr/bin/xcrun", ["stapler", "validate", app]);
+  staple(app);
   run("/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=2", app]);
   NodeFS.mkdirSync(output, { recursive: true });
   const zipName = `T3-Code-Azure-${provenance.version}-arm64.zip`;
@@ -261,8 +273,7 @@ try {
     ]),
   );
   if (dmgNotary.status !== "Accepted") throw new Error("Apple did not accept DMG notarization.");
-  run("/usr/bin/xcrun", ["stapler", "staple", NodePath.join(output, dmgName)]);
-  run("/usr/bin/xcrun", ["stapler", "validate", NodePath.join(output, dmgName)]);
+  staple(NodePath.join(output, dmgName));
   for (const { name, archivePath } of packages) {
     NodeFS.copyFileSync(archivePath, NodePath.join(output, name));
   }
