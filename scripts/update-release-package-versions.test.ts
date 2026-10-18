@@ -16,7 +16,6 @@ import {
   ReleaseGitHubOutputConfigurationError,
   ReleaseGitHubOutputWriteError,
   ReleasePackageManifestError,
-  releasePackageFiles,
   updateReleasePackageVersions,
   updateReleasePackageVersionsCommand,
 } from "./update-release-package-versions.ts";
@@ -315,3 +314,4 @@ it.layer(ScriptTestLayer)("update-release-package-versions", (it) => {
     }),
   );
 });
+import { releasePackageFiles } from "./lib/release-packages.ts";

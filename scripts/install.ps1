@@ -5,7 +5,7 @@
 #
 # Environment:
 #   T3CODE_CHANNEL           release train to follow: stable, nightly, or preview
-#                            (default: stable; preview is a maintainers' test train)
+#                            (default: nightly; preview is a maintainers' test train)
 #   T3CODE_VERSION           exact version to install (overrides T3CODE_CHANNEL)
 #   T3CODE_HOME              T3 home directory (default: ~\.t3)
 #   T3CODE_INSTALL_BIN_DIR   where t3.exe is linked (default: ~\.local\bin)
@@ -16,7 +16,7 @@
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$repo = "pingdotgg/t3code"
+$repo = "Jonathanm10/t3code-azure-nightly"
 $baseUrl = if ($env:T3CODE_RELEASE_BASE_URL) { $env:T3CODE_RELEASE_BASE_URL.TrimEnd("/") } else { "https://github.com/$repo/releases/download" }
 $t3Home = if ($env:T3CODE_HOME) { $env:T3CODE_HOME } else { Join-Path $HOME ".t3" }
 $binDir = if ($env:T3CODE_INSTALL_BIN_DIR) { $env:T3CODE_INSTALL_BIN_DIR } else { Join-Path $HOME ".local\bin" }
@@ -127,7 +127,7 @@ $arch = switch ($rawArch) {
   default { Fail "unsupported architecture $rawArch" }
 }
 
-$channel = if ($env:T3CODE_CHANNEL) { $env:T3CODE_CHANNEL } else { "stable" }
+$channel = if ($env:T3CODE_CHANNEL) { $env:T3CODE_CHANNEL } else { "nightly" }
 $version = $env:T3CODE_VERSION
 if (-not $version) {
   # Tags are v<semver>; the channel is the prerelease identifier, or none for
@@ -145,7 +145,7 @@ if (-not $version) {
   $version = $tag.Substring(1)
 }
 if ($version -match '-preview\.') {
-  Write-Warning "t3 $version is a preview build. Preview builds are cut by maintainers from unreleased branches to exercise the release pipeline. They can be broken, receive no fixes, and are never offered as updates. Set T3CODE_CHANNEL=stable (the default) for a supported build."
+  Write-Warning "t3 $version is a preview build. Preview builds are cut by maintainers from unreleased branches to exercise the release pipeline. They can be broken, receive no fixes, and are never offered as updates. Set T3CODE_CHANNEL=nightly (the default) for Azure Nightly."
   if ($channel -ne "preview" -and -not $env:T3CODE_VERSION) {
     Fail "refusing a preview build that was not explicitly requested"
   }
@@ -157,9 +157,24 @@ $versionsDir = Join-Path $t3Home "runtime\versions"
 $targetDir = Join-Path $versionsDir $version
 $marker = Join-Path $targetDir ".install-complete"
 
-if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $version)) {
+function Test-ReleaseMetadata([string] $directory) {
+  try {
+    $origin = [System.IO.File]::ReadAllText((Join-Path $directory ".release-origin"))
+    $metadata = Get-Content (Join-Path $directory ".release-provenance.json") -Raw | ConvertFrom-Json
+    return (($origin -ceq $repo) -or ($origin -ceq "$repo`n")) -and `
+      ($metadata.repository -ceq $repo) -and ($metadata.version -ceq $version) -and `
+      ($metadata.platformKey -ceq "win32-$arch") -and ($metadata.sourceSha -cmatch '^[0-9a-f]{40}$')
+  } catch { return $false }
+}
+function Test-RuntimeReady {
+  return (Test-Path (Join-Path $targetDir "t3.exe") -PathType Leaf) -and `
+    (Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -ceq $version) -and (Test-ReleaseMetadata $targetDir)
+}
+
+if (Test-RuntimeReady) {
   Step "Version $version is already downloaded."
 } else {
+  if (Test-Path $targetDir) { Fail "preserving runtime collision at $targetDir; expected a complete $repo release" }
   New-Item -ItemType Directory -Force -Path $versionsDir | Out-Null
   $staging = Join-Path $versionsDir (".staging-" + [System.IO.Path]::GetRandomFileName())
   New-Item -ItemType Directory -Path $staging | Out-Null
@@ -194,15 +209,20 @@ if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $version)) {
       Expand-Archive -Path (Join-Path $staging $archive) -DestinationPath $staging -Force
     } finally { $global:ProgressPreference = $savedProgress }
     # The archive wraps everything in one directory named after its stem.
-    Get-ChildItem (Join-Path $staging $stem) | Move-Item -Destination $staging
+    Get-ChildItem (Join-Path $staging $stem) -Force | Move-Item -Destination $staging
     Remove-Item (Join-Path $staging $stem), (Join-Path $staging $archive), (Join-Path $staging "SHA256SUMS") -Recurse -Force
 
+    if (-not (Test-ReleaseMetadata $staging)) { throw "invalid $repo runtime origin or provenance" }
     & (Join-Path $staging "t3.exe") --version | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "the downloaded executable does not run" }
     Set-Content -Path (Join-Path $staging ".install-complete") -Value $version -NoNewline
 
-    if (Test-Path $targetDir) { Remove-Item $targetDir -Recurse -Force }
-    Move-Item $staging $targetDir
+    try {
+      [System.IO.Directory]::Move($staging, $targetDir)
+    } catch {
+      if (-not (Test-RuntimeReady)) { throw "preserving runtime collision or failed publication at $targetDir`: $_" }
+      Remove-Item $staging -Recurse -Force
+    }
   } catch {
     if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
     throw

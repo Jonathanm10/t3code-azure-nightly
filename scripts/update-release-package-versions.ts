@@ -11,6 +11,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { Argument, Command, Flag } from "effect/cli";
 import { fromJsonStringPretty } from "@t3tools/shared/schemaJson";
+import { releasePackageFiles } from "./lib/release-packages.ts";
 
 export class ReleasePackageManifestError extends Schema.TaggedError<ReleasePackageManifestError>()(
   "ReleasePackageManifestError",
@@ -45,13 +46,6 @@ export class ReleaseGitHubOutputWriteError extends Schema.TaggedError<ReleaseGit
     return `Failed to append release package version output to '${this.filePath}'.`;
   }
 }
-
-export const releasePackageFiles = [
-  "apps/server/package.json",
-  "apps/desktop/package.json",
-  "apps/web/package.json",
-  "packages/contracts/package.json",
-] as const;
 
 interface UpdateReleasePackageVersionsOptions {
   readonly rootDir?: string | undefined;

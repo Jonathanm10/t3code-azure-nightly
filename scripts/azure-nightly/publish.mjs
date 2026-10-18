@@ -2,18 +2,25 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import { compareVersions, sha256, validateCompleteAssets } from "./release-policy.mjs";
+import { readLinuxCliArchive } from "./cli-archive.mjs";
+import {
+  CLI_RELEASE_REPOSITORY,
+  cliReleaseProvenanceJson,
+  parseChecksums,
+} from "../../packages/shared/src/cliRelease.ts";
 
 if (process.env.GITHUB_REF !== "refs/heads/release-control")
   throw new Error("Publication requires the protected release-control branch.");
 const repository = process.env.GITHUB_REPOSITORY;
 const token = process.env.GH_TOKEN;
-if (!repository || !/^[\w.-]+\/[\w.-]+$/.test(repository) || !token)
+if (repository !== CLI_RELEASE_REPOSITORY || !token)
   throw new Error("Release repository and publisher token are required.");
 const directory = NodePath.resolve(process.argv[2] ?? "signed");
 const manifest = JSON.parse(
   NodeFS.readFileSync(NodePath.resolve(directory, "release-manifest.json"), "utf8"),
 );
 if (
+  !/^\d+\.\d+\.\d+-nightly\.\d{8}\.\d+$/.test(manifest.version) ||
   !/^[0-9a-f]{40}$/.test(manifest.sourceSha) ||
   manifest.controllerSha !== process.env.GITHUB_SHA ||
   !/^[A-Fa-f0-9]{40}$/.test(manifest.signingIdentitySha1) ||
@@ -32,12 +39,35 @@ const mandatory = [
   `T3-Code-Azure-${manifest.version}-arm64.dmg`,
   "nightly-mac.yml",
   "release-manifest.json",
+  `t3-${manifest.version}-linux-x64.tar.gz`,
+  "SHA256SUMS",
 ];
 if (
   mandatory.some((name) => !files.some((file) => file.name === name)) ||
   files.filter((file) => file.name.endsWith(".tgz")).length !== 2
 )
-  throw new Error("Release is missing required desktop or standalone package assets.");
+  throw new Error(
+    "Release is missing required desktop, Linux, checksum or standalone package assets.",
+  );
+const linux = readLinuxCliArchive({
+  directory,
+  version: manifest.version,
+  sourceSha: manifest.sourceSha,
+  run: NodeChildProcess.execFileSync,
+  stat: NodeFS.lstatSync,
+});
+if (
+  manifest.cli === undefined ||
+  cliReleaseProvenanceJson(manifest.cli) !== cliReleaseProvenanceJson(linux.provenance)
+) {
+  throw new Error("Release manifest CLI provenance does not match the Linux archive.");
+}
+const sums = files.find((file) => file.name === "SHA256SUMS");
+const linuxFile = files.find((file) => file.name === linux.name);
+const checksums = parseChecksums(sums.bytes.toString("utf8"));
+if (checksums.size !== 1 || checksums.get(linux.name) !== linuxFile.sha256) {
+  throw new Error("Release Linux archive digest is missing or mismatched in SHA256SUMS.");
+}
 async function api(route, options = {}) {
   const response = await fetch(`https://api.github.com/repos/${repository}${route}`, {
     ...options,
@@ -104,7 +134,7 @@ const draft = await api("/releases", {
     draft: true,
     prerelease: true,
     make_latest: "false",
-    body: `Upstream ${manifest.upstreamTag} (${manifest.upstreamSha}).\nFork source ${manifest.sourceSha}.\nController ${manifest.controllerSha}.\nSigned and notarized macOS arm64. Standalone Azure core and MCP packages are included.`,
+    body: `Upstream ${manifest.upstreamTag} (${manifest.upstreamSha}).\nFork source ${manifest.sourceSha}.\nController ${manifest.controllerSha}.\nSigned and notarized macOS arm64 and same-source Linux x64 CLI. Standalone Azure core and MCP packages are included.`,
   }),
 });
 for (const file of files) {

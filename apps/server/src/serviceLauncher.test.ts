@@ -2,11 +2,13 @@
 import type * as NodeChildProcess from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, it } from "@effect/vitest";
 import { SERVER_EXIT_CODE_STATE_DIR_OWNED } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import { CLI_RELEASE_REPOSITORY } from "@t3tools/shared/cliRelease";
 import { vi } from "vite-plus/test";
 
 import {
@@ -115,9 +117,23 @@ const writeFakeRuntime = (
 ) =>
   Effect.gen(function* () {
     const entryPath = path.join(versionDir, "t3");
+    const platformKey = `${yield* HostProcess.Platform}-${yield* HostProcess.Architecture}`;
     yield* fs.makeDirectory(versionDir, { recursive: true });
     yield* fs.writeFileString(entryPath, `#!${process.execPath}\n${childSource}`);
     yield* fs.chmod(entryPath, 0o755);
+    yield* fs.writeFileString(
+      path.join(versionDir, ".release-origin"),
+      `${CLI_RELEASE_REPOSITORY}\n`,
+    );
+    yield* fs.writeFileString(
+      path.join(versionDir, ".release-provenance.json"),
+      JSON.stringify({
+        repository: CLI_RELEASE_REPOSITORY,
+        version: path.basename(versionDir),
+        sourceSha: "a".repeat(40),
+        platformKey,
+      }),
+    );
     yield* fs.writeFileString(
       path.join(versionDir, ".install-complete"),
       `${path.basename(versionDir)}\n`,
@@ -126,6 +142,102 @@ const writeFakeRuntime = (
   });
 
 it.layer(NodeServices.layer)("service state persistence", (it) => {
+  it.effect.each(["missing", "foreign", "wrong-version", "wrong-source"])(
+    "refuses an active runtime with invalid release metadata before spawning (%s)",
+    (kind) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-launcher-origin-" });
+        const platformKey = `${yield* HostProcess.Platform}-${yield* HostProcess.Architecture}`;
+        const dir = path.join(root, "runtime/versions/1.0.0");
+        yield* writeFakeRuntime(fs, path, dir, "process.exit(0);\n");
+        if (kind === "missing") yield* fs.remove(path.join(dir, ".release-origin"));
+        if (kind === "foreign")
+          yield* fs.writeFileString(path.join(dir, ".release-origin"), "pingdotgg/t3code\n");
+        if (kind === "wrong-version" || kind === "wrong-source") {
+          yield* fs.writeFileString(
+            path.join(dir, ".release-provenance.json"),
+            JSON.stringify({
+              repository: CLI_RELEASE_REPOSITORY,
+              version: kind === "wrong-version" ? "9.9.9" : "1.0.0",
+              sourceSha: kind === "wrong-source" ? "unknown" : "a".repeat(40),
+              platformKey,
+            }),
+          );
+        }
+        const before = spawnedChildren.length;
+        const launcher = new Launcher(root, {
+          protocol: SERVICE_LAUNCHER_PROTOCOL,
+          activeVersion: "1.0.0",
+        });
+        const error = yield* Effect.promise(() =>
+          launcher.run().then(
+            () => {
+              throw new Error("launcher unexpectedly completed");
+            },
+            (error: unknown) => error,
+          ),
+        );
+        assert.instanceOf(error, Error);
+        assert.include(error.message, "provenance");
+        assert.equal(spawnedChildren.length, before);
+        assert.isTrue(yield* fs.exists(path.join(dir, "t3")));
+      }),
+  );
+
+  it.effect.each(["target", "rollback"])(
+    "refuses a foreign %s runtime and preserves rollback state and database",
+    (role) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-launcher-recovery-origin-" });
+        const dbPath = path.join(root, "userdata/state.sqlite");
+        yield* fs.makeDirectory(path.dirname(dbPath), { recursive: true });
+        yield* fs.writeFileString(dbPath, "original database");
+        for (const version of ["1.0.0", "1.1.0"]) {
+          yield* writeFakeRuntime(
+            fs,
+            path,
+            path.join(root, "runtime/versions", version),
+            "process.exit(1);\n",
+          );
+        }
+        const foreignVersion = role === "target" ? "1.1.0" : "1.0.0";
+        yield* fs.writeFileString(
+          path.join(root, "runtime/versions", foreignVersion, ".release-origin"),
+          "pingdotgg/t3code\n",
+        );
+        const initial = {
+          protocol: SERVICE_LAUNCHER_PROTOCOL,
+          activeVersion: "1.0.0",
+          update: {
+            id: "origin-recovery",
+            fromVersion: "1.0.0",
+            targetVersion: "1.1.0",
+            dbPath,
+            status: "pending",
+          },
+        } as const;
+        const statePath = path.join(root, "runtime/service-state.json");
+        yield* Effect.promise(() => writeServiceState(statePath, initial));
+        const before = spawnedChildren.length;
+        yield* Effect.promise(() => new Launcher(root, initial).run().catch(() => undefined));
+        assert.equal(spawnedChildren.length - before, 1);
+        const state = yield* Effect.promise(() => readServiceState(statePath));
+        assert.equal(state.activeVersion, "1.0.0");
+        assert.equal(state.update?.status, role === "target" ? "failed" : "rolled-back");
+        assert.equal(yield* fs.readFileString(dbPath), "original database");
+        assert.equal(
+          yield* fs.readFileString(
+            path.join(root, "runtime/versions", foreignVersion, ".release-origin"),
+          ),
+          "pingdotgg/t3code\n",
+        );
+      }),
+  );
+
   it.effect("durably replaces and strictly reads one state document", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

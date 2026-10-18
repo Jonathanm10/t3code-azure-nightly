@@ -2,9 +2,9 @@ import * as NodeTest from "node:test";
 import * as NodeAssert from "node:assert/strict";
 import { sha256 } from "./release-policy.mjs";
 
-async function fixture(t, tampered = false) {
+async function fixture(t, tampered = false, invalid = "") {
   const version = "0.1.1-nightly.20261017.1";
-  const repository = "fixture/fork";
+  const repository = "Jonathanm10/t3code-azure-nightly";
   const payloads = Object.fromEntries(
     [
       `T3-Code-Azure-${version}-arm64.zip`,
@@ -12,8 +12,17 @@ async function fixture(t, tampered = false) {
       "nightly-mac.yml",
       "client.tgz",
       "mcp.tgz",
+      `t3-${version}-linux-x64.tar.gz`,
     ].map((name) => [name, Buffer.from(`fixture ${name}`)]),
   );
+  const linuxName = `t3-${version}-linux-x64.tar.gz`;
+  const cli = { repository, version, sourceSha: "a".repeat(40), platformKey: "linux-x64" };
+  payloads.SHA256SUMS = Buffer.from(`${sha256(payloads[linuxName])}  ${linuxName}\n`);
+  if (invalid === "missing-linux") delete payloads[linuxName];
+  if (invalid === "missing-checksums") delete payloads.SHA256SUMS;
+  if (invalid === "wrong-checksum")
+    payloads.SHA256SUMS = Buffer.from(`${"0".repeat(64)}  ${linuxName}\n`);
+  if (invalid === "missing-hash") payloads.SHA256SUMS = Buffer.from("");
   const assets = Object.entries(payloads).map(([name, bytes], index) => ({
     name,
     size: bytes.length,
@@ -29,6 +38,13 @@ async function fixture(t, tampered = false) {
     signingIdentitySha1: "d".repeat(40),
     notarizationId: "fixture-notary",
     assets,
+    cli:
+      invalid === "missing-provenance"
+        ? undefined
+        : {
+            ...cli,
+            ...(invalid === "manifest-source" ? { sourceSha: "b".repeat(40) } : {}),
+          },
   };
   payloads["release-manifest.json"] = Buffer.from(JSON.stringify(manifest));
   const manifestBytes = payloads["release-manifest.json"];
@@ -36,12 +52,13 @@ async function fixture(t, tampered = false) {
     name: "release-manifest.json",
     size: manifestBytes.length,
     sha256: sha256(manifestBytes),
-    id: 6,
+    id: assets.length + 1,
     browser_download_url: `https://github.com/${repository}/releases/download/v${version}/release-manifest.json`,
   });
   t.mock.module("node:fs", {
     namedExports: {
       readdirSync: () => Object.keys(payloads),
+      lstatSync: () => ({ isFile: () => true }),
       readFileSync: (filename) => payloads[String(filename).split("/").at(-1)],
     },
   });
@@ -50,6 +67,18 @@ async function fixture(t, tampered = false) {
     namedExports: {
       execFileSync: (...args) => {
         commands.push(args);
+        if (args[0] === "/usr/bin/tar") {
+          const tarArgs = args[1];
+          const stem = linuxName.slice(0, -".tar.gz".length);
+          if (tarArgs[0] === "-tzf")
+            return `${stem}/.release-origin\n${stem}/.release-provenance.json\n`;
+          if (tarArgs[2].endsWith(".release-origin")) return `${repository}\n`;
+          return JSON.stringify({
+            ...cli,
+            ...(invalid === "archive-source" ? { sourceSha: "b".repeat(40) } : {}),
+            ...(invalid === "archive-version" ? { version: "9.9.9" } : {}),
+          });
+        }
         return "";
       },
     },
@@ -102,11 +131,11 @@ NodeTest.test(
     const state = await fixture(t);
     await import(`./publish.mjs?complete=${Date.now()}`);
     NodeAssert.equal(state.isPublished(), true);
-    NodeAssert.equal(state.commands.length, 2);
+    NodeAssert.equal(state.commands.filter(([command]) => command === "git").length, 2);
     NodeAssert.equal(state.requests.filter((request) => request.method === "DELETE").length, 0);
     NodeAssert.equal(
       state.requests.filter((request) => request.pathname.includes("/releases/download/")).length,
-      6,
+      8,
     );
   },
 );
@@ -123,3 +152,31 @@ NodeTest.test(
     );
   },
 );
+
+for (const invalid of [
+  "missing-linux",
+  "missing-checksums",
+  "wrong-checksum",
+  "missing-hash",
+  "missing-provenance",
+  "manifest-source",
+  "archive-source",
+  "archive-version",
+]) {
+  NodeTest.test(
+    `keeps publication closed for ${invalid}, even with a self-consistent asset manifest`,
+    async (t) => {
+      const state = await fixture(t, false, invalid);
+      await NodeAssert.rejects(
+        import(`./publish.mjs?invalid=${invalid}`),
+        /required|provenance|digest/,
+      );
+      NodeAssert.equal(state.isPublished(), false);
+      NodeAssert.equal(state.requests.length, 0);
+      NodeAssert.equal(
+        state.commands.some(([command]) => command === "git"),
+        false,
+      );
+    },
+  );
+}

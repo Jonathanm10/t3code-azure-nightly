@@ -1,4 +1,6 @@
-const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
+export const CLI_RELEASE_REPOSITORY = "Jonathanm10/t3code-azure-nightly";
+export const CLI_RELEASE_ORIGIN_FILE = ".release-origin";
+export const CLI_RELEASE_PROVENANCE_FILE = ".release-provenance.json";
 export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
 export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";
 
@@ -18,6 +20,58 @@ const CLI_ARCHIVE_PLATFORM_KEYS = [
   "win32-x64",
 ] as const;
 export type CliArchivePlatformKey = (typeof CLI_ARCHIVE_PLATFORM_KEYS)[number];
+
+export interface CliReleaseProvenance {
+  readonly repository: typeof CLI_RELEASE_REPOSITORY;
+  readonly version: string;
+  readonly sourceSha: string;
+  readonly platformKey: CliArchivePlatformKey;
+}
+
+export function parseCliReleaseProvenance(
+  text: string,
+  expected: Pick<CliReleaseProvenance, "version" | "platformKey">,
+): CliReleaseProvenance | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("repository" in value) ||
+    value.repository !== CLI_RELEASE_REPOSITORY ||
+    !("version" in value) ||
+    value.version !== expected.version ||
+    !("platformKey" in value) ||
+    value.platformKey !== expected.platformKey ||
+    !("sourceSha" in value) ||
+    typeof value.sourceSha !== "string" ||
+    !/^[0-9a-f]{40}$/.test(value.sourceSha)
+  )
+    return undefined;
+  return {
+    repository: CLI_RELEASE_REPOSITORY,
+    version: expected.version,
+    sourceSha: value.sourceSha,
+    platformKey: expected.platformKey,
+  };
+}
+
+export function isCliReleaseOrigin(text: string): boolean {
+  return text === CLI_RELEASE_REPOSITORY || text === `${CLI_RELEASE_REPOSITORY}\n`;
+}
+
+export function cliReleaseProvenanceJson(provenance: CliReleaseProvenance): string {
+  return JSON.stringify({
+    repository: provenance.repository,
+    version: provenance.version,
+    sourceSha: provenance.sourceSha,
+    platformKey: provenance.platformKey,
+  });
+}
 
 export function cliArchivePlatformKey(
   platform: NodeJS.Platform,
@@ -103,3 +157,17 @@ export function newestCliReleaseVersion(
   }
   return undefined;
 }
+
+// Canonical JSON keeps the bootstrap usable on hosts without Node or jq.
+export const CLI_RELEASE_METADATA_SHELL = String.raw`T3_RELEASE_REPOSITORY='${CLI_RELEASE_REPOSITORY}'
+t3_release_metadata_matches() {
+  _t3_release_dir="$1"
+  _t3_release_version="$2"
+  _t3_release_platform="$3"
+  [ "$(cat "$_t3_release_dir/.release-origin" 2>/dev/null)" = "$T3_RELEASE_REPOSITORY" ] || return 1
+  _t3_release_json="$(cat "$_t3_release_dir/.release-provenance.json" 2>/dev/null)" || return 1
+  _t3_release_sha="$(printf '%s\n' "$_t3_release_json" | sed -n 's/^.*"sourceSha":"\([0-9a-f]\{40\}\)".*$/\1/p')"
+  [ -n "$_t3_release_sha" ] || return 1
+  [ "$_t3_release_json" = "$(printf '{"repository":"%s","version":"%s","sourceSha":"%s","platformKey":"%s"}' "$T3_RELEASE_REPOSITORY" "$_t3_release_version" "$_t3_release_sha" "$_t3_release_platform")" ]
+}
+`;

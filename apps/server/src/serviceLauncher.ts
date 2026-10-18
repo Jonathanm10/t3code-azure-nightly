@@ -9,6 +9,14 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import {
+  CLI_RELEASE_ORIGIN_FILE,
+  CLI_RELEASE_PROVENANCE_FILE,
+  CLI_RELEASE_REPOSITORY,
+  cliArchivePlatformKey,
+  isCliReleaseOrigin,
+  parseCliReleaseProvenance,
+} from "@t3tools/shared/cliRelease";
 
 import type {
   PendingServiceUpdate,
@@ -371,11 +379,21 @@ export async function writeServiceState(filePath: string, state: ServiceState): 
 async function runtimeExists(baseDir: string, version: string): Promise<boolean> {
   const paths = runtimePaths(baseDir, version);
   try {
-    const [entry, sentinel] = await Promise.all([
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone launcher has no Effect runtime.
+    const platformKey = cliArchivePlatformKey(process.platform, process.arch);
+    if (platformKey === undefined) return false;
+    const [entry, sentinel, origin, provenance] = await Promise.all([
       NodeFSP.stat(paths.entryPath),
       NodeFSP.readFile(paths.sentinelPath, "utf8"),
+      NodeFSP.readFile(NodePath.join(paths.versionDir, CLI_RELEASE_ORIGIN_FILE), "utf8"),
+      NodeFSP.readFile(NodePath.join(paths.versionDir, CLI_RELEASE_PROVENANCE_FILE), "utf8"),
     ]);
-    return entry.isFile() && sentinel.trim() === version;
+    return (
+      entry.isFile() &&
+      sentinel.trim() === version &&
+      isCliReleaseOrigin(origin) &&
+      parseCliReleaseProvenance(provenance, { version, platformKey }) !== undefined
+    );
   } catch {
     return false;
   }
@@ -571,7 +589,9 @@ export class Launcher {
   async #startChild(version: string, role: ChildRole, update?: ServiceUpdateRecord): Promise<void> {
     if (this.#stopping) return;
     if (!(await runtimeExists(this.#baseDir, version))) {
-      throw new Error(`Selected t3@${version} runtime is missing or incomplete.`);
+      throw new Error(
+        `Selected t3@${version} runtime is missing, incomplete, or has invalid ${CLI_RELEASE_REPOSITORY} provenance.`,
+      );
     }
     if (this.#stopping) return;
     const paths = runtimePaths(this.#baseDir, version);
@@ -661,7 +681,9 @@ export class Launcher {
       return;
     }
     if (!(await runtimeExists(this.#baseDir, message.targetVersion))) {
-      await reject("The requested target runtime is missing or incomplete.");
+      await reject(
+        `The requested target runtime is missing, incomplete, or has invalid ${CLI_RELEASE_REPOSITORY} provenance.`,
+      );
       return;
     }
     // A check that cannot run refuses the update too: the alternative is

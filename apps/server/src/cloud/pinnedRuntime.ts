@@ -11,6 +11,11 @@ import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
   CLI_RELEASE_CHECKSUMS_FILE,
+  CLI_RELEASE_REPOSITORY,
+  CLI_RELEASE_ORIGIN_FILE,
+  CLI_RELEASE_PROVENANCE_FILE,
+  isCliReleaseOrigin,
+  parseCliReleaseProvenance,
   cliArchiveFileName,
   cliArchivePlatformKey,
   cliArchiveTarCommand,
@@ -247,35 +252,67 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
 ) {
   const { fs } = input;
   const paths = pinnedRuntimePaths(input.path, input.baseDir, input.version, input.platform);
-  const [versionDirExists, entryExists, sentinel] = yield* Effect.all([
-    fs.exists(paths.versionDir),
-    fs.exists(paths.entryPath),
-    fs.readFileString(paths.sentinelPath).pipe(Effect.option),
-  ]).pipe(
+  const platformKey = cliArchivePlatformKey(input.platform, input.arch);
+  if (platformKey === undefined) {
+    return yield* new PinnedRuntimeInstallError({
+      step: `selecting a runtime for ${input.platform}-${input.arch}`,
+    });
+  }
+  const hasReleaseMetadata = (versionDir: string) =>
+    Effect.all([
+      fs.readFileString(input.path.join(versionDir, CLI_RELEASE_ORIGIN_FILE)).pipe(Effect.option),
+      fs
+        .readFileString(input.path.join(versionDir, CLI_RELEASE_PROVENANCE_FILE))
+        .pipe(Effect.option),
+    ]).pipe(
+      Effect.map(
+        ([origin, provenance]) =>
+          Option.isSome(origin) &&
+          isCliReleaseOrigin(origin.value) &&
+          Option.isSome(provenance) &&
+          parseCliReleaseProvenance(provenance.value, {
+            version: input.version,
+            platformKey,
+          }) !== undefined,
+      ),
+    );
+  const isCompletedRelease = (candidate: PinnedRuntimePaths) =>
+    Effect.all([
+      fs.exists(candidate.entryPath),
+      fs.readFileString(candidate.sentinelPath).pipe(Effect.option),
+      hasReleaseMetadata(candidate.versionDir),
+    ]).pipe(
+      Effect.map(
+        ([entry, sentinel, metadata]) =>
+          entry && Option.isSome(sentinel) && sentinel.value.trim() === input.version && metadata,
+      ),
+    );
+  const collision = () =>
+    new PinnedRuntimeInstallError({
+      step: `preserving runtime collision at ${paths.versionDir}; expected a complete ${CLI_RELEASE_REPOSITORY} release with matching metadata`,
+    });
+  const alreadyPinned = yield* isCompletedRelease(paths).pipe(
     Effect.mapError(
       (cause) => new PinnedRuntimeInstallError({ step: "checking the pinned runtime", cause }),
     ),
   );
-  const alreadyPinned =
-    entryExists && Option.isSome(sentinel) && sentinel.value.trim() === input.version;
   if (alreadyPinned) {
     input.onProgress?.({ stage: "cached" });
     yield* input.validate(paths);
     return paths;
   }
-  if (versionDirExists) {
-    yield* fs.remove(paths.versionDir, { recursive: true, force: true }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new PinnedRuntimeInstallError({
-            step: "removing an incomplete pinned runtime",
-            cause,
-          }),
-      ),
-    );
-  }
+  if (
+    yield* fs
+      .exists(paths.versionDir)
+      .pipe(
+        Effect.mapError(
+          (cause) => new PinnedRuntimeInstallError({ step: "checking a runtime collision", cause }),
+        ),
+      )
+  )
+    return yield* collision();
 
-  const versionsDir = input.path.dirname(paths.versionDir);
+  const versionsDir = input.path.resolve(input.path.dirname(paths.versionDir));
   yield* fs.makeDirectory(versionsDir, { recursive: true }).pipe(
     Effect.mapError(
       (cause) =>
@@ -285,10 +322,10 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
         }),
     ),
   );
-  const stagingDir = yield* fs
+  const stagingContainer = yield* fs
     .makeTempDirectory({
       directory: versionsDir,
-      prefix: ".staging-",
+      prefix: ".content-",
     })
     .pipe(
       Effect.mapError(
@@ -299,6 +336,7 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
           }),
       ),
     );
+  const stagingDir = input.path.join(stagingContainer, input.version);
   const stagingPaths: PinnedRuntimePaths = {
     versionDir: stagingDir,
     entryPath: input.path.join(stagingDir, input.path.relative(paths.versionDir, paths.entryPath)),
@@ -306,8 +344,20 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
   };
 
   return yield* Effect.gen(function* () {
+    yield* fs
+      .makeDirectory(stagingDir)
+      .pipe(
+        Effect.mapError(
+          (cause) => new PinnedRuntimeInstallError({ step: "preparing runtime content", cause }),
+        ),
+      );
     yield* installFromArchive(input, stagingDir);
 
+    if (!(yield* hasReleaseMetadata(stagingDir))) {
+      return yield* new PinnedRuntimeInstallError({
+        step: `verifying downloaded runtime origin and provenance for ${CLI_RELEASE_REPOSITORY}`,
+      });
+    }
     input.onProgress?.({ stage: "validate" });
     yield* input.validate(stagingPaths);
     yield* fs
@@ -318,39 +368,43 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
             new PinnedRuntimeInstallError({ step: "recording the completed install", cause }),
         ),
       );
-    const published = yield* fs.rename(stagingDir, paths.versionDir).pipe(
-      Effect.as(true),
-      Effect.catch((cause) =>
-        Effect.all([
-          fs.exists(paths.entryPath),
-          fs.readFileString(paths.sentinelPath).pipe(Effect.option),
-        ]).pipe(
-          Effect.mapError(
-            (checkCause) =>
-              new PinnedRuntimeInstallError({
-                step: "checking a concurrently published pinned runtime",
-                cause: checkCause,
-              }),
-          ),
-          Effect.flatMap(([publishedEntryExists, publishedSentinel]) =>
-            publishedEntryExists &&
-            Option.isSome(publishedSentinel) &&
-            publishedSentinel.value.trim() === input.version
-              ? Effect.succeed(false)
-              : Effect.fail(
-                  new PinnedRuntimeInstallError({
-                    step: "publishing the pinned runtime",
-                    cause,
-                  }),
-                ),
-          ),
+    const acceptWinner = () =>
+      isCompletedRelease(paths).pipe(
+        Effect.mapError(
+          (cause) =>
+            new PinnedRuntimeInstallError({
+              step: "checking a concurrently published pinned runtime",
+              cause,
+            }),
         ),
-      ),
+        Effect.flatMap((complete) => (complete ? Effect.succeed(false) : Effect.fail(collision()))),
+      );
+    // POSIX rename can replace a raced empty directory. Creating the public
+    // symlink exclusively keeps every existing entry intact. Windows directory
+    // rename already rejects an existing destination directory.
+    const published = yield* (
+      input.platform === "win32"
+        ? fs.rename(stagingDir, paths.versionDir)
+        : fs.symlink(stagingDir, paths.versionDir)
+    ).pipe(
+      Effect.uninterruptible,
+      Effect.as(true),
+      Effect.catch(() => acceptWinner()),
     );
     if (!published) yield* input.validate(paths);
     return paths;
   }).pipe(
-    Effect.ensuring(fs.remove(stagingDir, { recursive: true, force: true }).pipe(Effect.ignore)),
+    Effect.ensuring(
+      // Cancellation can arrive after publication but before the caller resumes.
+      fs.readLink(paths.versionDir).pipe(
+        Effect.option,
+        Effect.flatMap((link) =>
+          Option.isSome(link) && link.value === stagingDir
+            ? Effect.void
+            : fs.remove(stagingContainer, { recursive: true, force: true }).pipe(Effect.ignore),
+        ),
+      ),
+    ),
   );
 });
 

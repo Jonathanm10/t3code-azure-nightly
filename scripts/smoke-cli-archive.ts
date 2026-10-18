@@ -16,6 +16,13 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import {
+  CLI_RELEASE_ORIGIN_FILE,
+  CLI_RELEASE_PROVENANCE_FILE,
+  cliArchivePlatformKey,
+  isCliReleaseOrigin,
+  parseCliReleaseProvenance,
+} from "@t3tools/shared/cliRelease";
 import { windowsSystemTar } from "./build-cli-archive.ts";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
@@ -110,6 +117,20 @@ const smokeCliArchive = Effect.fn("smokeCliArchive")(function* (input: {
     }
   }
 
+  const platformKey = cliArchivePlatformKey(platform, yield* HostProcess.Architecture);
+  const origin = yield* fs.readFileString(path.join(contentDir, CLI_RELEASE_ORIGIN_FILE));
+  const provenance = yield* fs.readFileString(path.join(contentDir, CLI_RELEASE_PROVENANCE_FILE));
+  if (
+    platformKey === undefined ||
+    !isCliReleaseOrigin(origin) ||
+    parseCliReleaseProvenance(provenance, { version: input.expectVersion, platformKey }) ===
+      undefined
+  ) {
+    return yield* new CliArchiveSmokeError({
+      step: "checking release provenance",
+      detail: "origin, version, source SHA or platform mismatch",
+    });
+  }
   const version = yield* runExecutable(executable, ["--version"], contentDir);
   if (version.exitCode !== 0 || !version.stdout.includes(input.expectVersion)) {
     return yield* new CliArchiveSmokeError({

@@ -23,6 +23,7 @@ import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { CLI_RELEASE_REPOSITORY } from "@t3tools/shared/cliRelease";
 import { fromJsonStringPretty } from "@t3tools/shared/schemaJson";
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 
@@ -77,7 +78,11 @@ export const buildNpmLauncher = Effect.fn("buildNpmLauncher")(function* (input: 
     path.join(stageDir, "package.json"),
     `${yield* encodePackageJson(npmLauncherPackageManifest(input.version))}\n`,
   );
-  yield* fs.copyFile(path.join(sourceDir, "t3.mjs"), path.join(stageDir, "bin/t3.mjs"));
+  const launcher = yield* fs.readFileString(path.join(sourceDir, "t3.mjs"));
+  yield* fs.writeFileString(
+    path.join(stageDir, "bin/t3.mjs"),
+    launcher.replaceAll("__T3_RELEASE_REPOSITORY__", CLI_RELEASE_REPOSITORY),
+  );
   yield* fs.chmod(path.join(stageDir, "bin/t3.mjs"), 0o755);
   yield* fs.copyFile(path.join(sourceDir, "bin.mjs"), path.join(stageDir, "dist/bin.mjs"));
   const readme = yield* path.fromFileUrl(new URL("../apps/server/README.md", import.meta.url));

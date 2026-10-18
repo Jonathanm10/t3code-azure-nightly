@@ -1,6 +1,20 @@
 import * as NodeTest from "node:test";
 import * as NodeAssert from "node:assert/strict";
 
+const linuxTarResult = (args, provenance) => {
+  const stem = `t3-${provenance.version}-linux-x64`;
+  if (args[0] === "-tzf") return `${stem}/.release-origin\n${stem}/.release-provenance.json\n`;
+  if (args[0] !== "-xOzf") return undefined;
+  return args[2].endsWith(".release-origin")
+    ? "Jonathanm10/t3code-azure-nightly\n"
+    : JSON.stringify({
+        repository: "Jonathanm10/t3code-azure-nightly",
+        version: provenance.version,
+        sourceSha: provenance.sourceSha,
+        platformKey: "linux-x64",
+      });
+};
+
 // oxlint-disable-next-line t3code/no-global-process-runtime -- The signer is restricted to the release host architecture.
 const unsupportedSigningHost = process.platform !== "darwin" || process.arch !== "arm64";
 
@@ -32,6 +46,7 @@ NodeTest.test(
     const removals = [];
     t.mock.module("node:fs", {
       namedExports: {
+        lstatSync: () => ({ isFile: () => true }),
         mkdtempSync: () => "/synthetic-release-fixture/owned",
         readFileSync: () => JSON.stringify(provenance),
         readdirSync: () => ["client.tgz", "mcp.tgz"],
@@ -97,6 +112,7 @@ for (const failingCommand of [
       const removals = [];
       t.mock.module("node:fs", {
         namedExports: {
+          lstatSync: () => ({ isFile: () => true }),
           mkdtempSync: () => "/synthetic-release-fixture/owned",
           readFileSync: () => JSON.stringify(provenance),
           readdirSync: (_path, options) => (options ? [] : ["client.tgz", "mcp.tgz"]),
@@ -124,6 +140,9 @@ for (const failingCommand of [
                     ? Buffer.from(diagnostic)
                     : "synthetic-sensitive-helper-output",
               });
+            }
+            if (command === "/usr/bin/tar" && linuxTarResult(args, provenance) !== undefined) {
+              return linuxTarResult(args, provenance);
             }
             if (command === "/usr/bin/tar")
               return JSON.stringify({
@@ -173,6 +192,82 @@ for (const failingCommand of [
         },
       );
       NodeAssert.deepEqual(removals, ["/synthetic-release-fixture/owned"]);
+    },
+  );
+}
+
+for (const failure of ["missing-linux", "missing-origin", "source", "version"]) {
+  NodeTest.test(
+    `rejects Linux ${failure} before importing signing credentials`,
+    { skip: unsupportedSigningHost },
+    async (t) => {
+      const provenance = {
+        version: "0.1.1-nightly.20261017.1",
+        sourceSha: "a".repeat(40),
+        upstreamSha: "b".repeat(40),
+        controllerSha: "c".repeat(40),
+      };
+      const previous = { ...process.env };
+      Object.assign(process.env, {
+        GITHUB_REF: "refs/heads/release-control",
+        GITHUB_SHA: provenance.controllerSha,
+        EXPECTED_SOURCE_SHA: provenance.sourceSha,
+        EXPECTED_UPSTREAM_SHA: provenance.upstreamSha,
+        EXPECTED_VERSION: provenance.version,
+        FORK_SIGNING_IDENTITY_SHA1: "d".repeat(40),
+        FORK_APPLE_TEAM_ID: "ABCDEFGHIJ",
+        RUNNER_TEMP: "/synthetic-release-fixture",
+      });
+      t.after(() => {
+        for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+        Object.assign(process.env, previous);
+      });
+      t.mock.module("node:fs", {
+        namedExports: {
+          mkdtempSync: () => "/synthetic-release-fixture/owned",
+          readFileSync: () => JSON.stringify(provenance),
+          readdirSync: () => ["client.tgz", "mcp.tgz"],
+          lstatSync: () => {
+            if (failure === "missing-linux") throw new Error("missing Linux archive");
+            return { isFile: () => true };
+          },
+          existsSync: () => false,
+          rmSync: () => undefined,
+        },
+      });
+      const commands = [];
+      t.mock.module("node:child_process", {
+        namedExports: {
+          execFileSync: (command, args) => {
+            commands.push(command);
+            NodeAssert.equal(command, "/usr/bin/tar");
+            if (args[0] === "-xOf")
+              return JSON.stringify({
+                name: `@jonathanm10/azure-devops-server-${args[1].endsWith("client.tgz") ? "client" : "mcp"}`,
+                version: "0.1.0",
+                source: provenance.sourceSha,
+                sourceTreeDirty: false,
+              });
+            if (failure === "missing-origin" && args[0] === "-tzf") return "missing metadata";
+            const result = linuxTarResult(args, provenance);
+            if (args[0] === "-xOzf" && args[2].endsWith(".json")) {
+              const metadata = JSON.parse(result);
+              if (failure === "source") metadata.sourceSha = "b".repeat(40);
+              if (failure === "version") metadata.version = "9.9.9";
+              return JSON.stringify(metadata);
+            }
+            return result;
+          },
+        },
+      });
+      await NodeAssert.rejects(
+        import(`./sign.mjs?linux=${failure}`),
+        /Linux|provenance|release-origin/,
+      );
+      NodeAssert.equal(
+        commands.every((command) => command === "/usr/bin/tar"),
+        true,
+      );
     },
   );
 }

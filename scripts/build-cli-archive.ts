@@ -18,6 +18,14 @@ import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import {
+  CLI_RELEASE_REPOSITORY,
+  CLI_RELEASE_ORIGIN_FILE,
+  CLI_RELEASE_PROVENANCE_FILE,
+  cliArchivePlatformKey as releasePlatformKey,
+  cliReleaseProvenanceJson,
+} from "@t3tools/shared/cliRelease";
+import { resolveCliArchiveProvenance } from "./lib/cli-release-provenance.ts";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
@@ -435,6 +443,7 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   readonly version: string;
   readonly outputDir: string;
   readonly resourceMonitorDir: Option.Option<string>;
+  readonly sourceSha: Option.Option<string>;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -473,6 +482,30 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     "Build the resource monitor or pass --resource-monitor-dir.",
   );
 
+  const platformKey = releasePlatformKey(
+    input.platform === "mac" ? "darwin" : input.platform === "win" ? "win32" : "linux",
+    input.arch,
+  );
+  if (platformKey === undefined) {
+    return yield* new CliArchiveInputMissingError({
+      inputPath: "platform",
+      hint: "Unsupported archive platform.",
+    });
+  }
+  const provenance = yield* Effect.try({
+    try: () =>
+      resolveCliArchiveProvenance({
+        repoRoot,
+        version: input.version,
+        platformKey,
+        sourceSha: Option.getOrUndefined(input.sourceSha),
+      }),
+    catch: (cause) =>
+      new CliArchiveInputMissingError({
+        inputPath: "candidate source provenance",
+        hint: cause instanceof Error ? cause.message : String(cause),
+      }),
+  });
   const stem = cliArchiveStem(input.version, input.platform, input.arch);
   const stageRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-archive-" });
   const contentDir = path.join(stageRoot, stem);
@@ -489,6 +522,15 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     arch: input.arch,
     version: input.version,
   });
+
+  yield* fs.writeFileString(
+    path.join(contentDir, CLI_RELEASE_ORIGIN_FILE),
+    `${CLI_RELEASE_REPOSITORY}\n`,
+  );
+  yield* fs.writeFileString(
+    path.join(contentDir, CLI_RELEASE_PROVENANCE_FILE),
+    `${cliReleaseProvenanceJson(provenance)}\n`,
+  );
 
   const executablePath = path.join(contentDir, executableName);
   if (input.platform === "mac") {
@@ -546,6 +588,10 @@ const command = Command.make(
       Flag.withDescription("Release version for the archive name."),
     ),
     outputDir: Flag.String("output-dir").pipe(Flag.withDefault("release-cli")),
+    sourceSha: Flag.String("source-sha").pipe(
+      Flag.withDescription("Expected clean candidate commit, checked against HEAD."),
+      Flag.optional,
+    ),
     resourceMonitorDir: Flag.String("resource-monitor-dir").pipe(
       Flag.withDescription(
         "Directory laid out like dist/resource-monitor (defaults to apps/server/dist/resource-monitor).",

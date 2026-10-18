@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  CLI_RELEASE_REPOSITORY,
+  type CliReleaseProvenance,
+  cliReleaseProvenanceJson,
+  isCliReleaseOrigin,
+  parseCliReleaseProvenance,
   cliArchiveFileName,
   cliArchivePlatformKey,
   cliArchiveTarCommand,
@@ -12,6 +17,29 @@ import {
 } from "./cliRelease.ts";
 
 describe("cliRelease", () => {
+  it("checks fixed fork origin independently of the download mirror", () => {
+    const expected = { version: "1.2.3-nightly.20261018.2", platformKey: "linux-x64" } as const;
+    const provenance: CliReleaseProvenance = {
+      repository: CLI_RELEASE_REPOSITORY,
+      ...expected,
+      sourceSha: "a".repeat(40),
+    };
+    expect(parseCliReleaseProvenance(cliReleaseProvenanceJson(provenance), expected)).toEqual(
+      provenance,
+    );
+    expect(isCliReleaseOrigin(`${CLI_RELEASE_REPOSITORY}\n`)).toBe(true);
+    for (const invalid of [
+      { ...provenance, repository: "pingdotgg/t3code" },
+      { ...provenance, version: "1.2.3" },
+      { ...provenance, platformKey: "darwin-arm64" },
+      { ...provenance, sourceSha: "unknown" },
+    ])
+      expect(parseCliReleaseProvenance(JSON.stringify(invalid), expected)).toBeUndefined();
+    expect(parseCliReleaseProvenance("invalid json", expected)).toBeUndefined();
+    expect(isCliReleaseOrigin("pingdotgg/t3code\n")).toBe(false);
+    expect(isCliReleaseOrigin("")).toBe(false);
+  });
+
   it("names archives by version and platform, zip only on Windows", () => {
     expect(cliArchiveFileName("1.2.3-preview.20260911.4", "linux-x64")).toBe(
       "t3-1.2.3-preview.20260911.4-linux-x64.tar.gz",
@@ -32,7 +60,7 @@ describe("cliRelease", () => {
 
   it("resolves download URLs under the tagged release, honoring a mirror", () => {
     expect(cliReleaseDownloadBaseUrl("1.2.3")).toBe(
-      "https://github.com/pingdotgg/t3code/releases/download/v1.2.3",
+      "https://github.com/Jonathanm10/t3code-azure-nightly/releases/download/v1.2.3",
     );
     expect(cliReleaseDownloadBaseUrl("1.2.3", "https://mirror.example/t3/")).toBe(
       "https://mirror.example/t3/v1.2.3",
@@ -85,7 +113,7 @@ describe("cliRelease", () => {
 
   it("pages through the release index at the largest page GitHub allows", () => {
     expect(cliReleaseIndexPageUrl(1)).toBe(
-      "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=100&page=1",
+      "https://api.github.com/repos/Jonathanm10/t3code-azure-nightly/releases?per_page=100&page=1",
     );
     expect(cliReleaseIndexPageUrl(3)).toContain("page=3");
   });

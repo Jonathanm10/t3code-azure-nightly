@@ -4,6 +4,7 @@ import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 import * as NodeURL from "node:url";
 import { sha256, validateStandalonePackageProvenance } from "./release-policy.mjs";
+import { readLinuxCliArchive } from "./cli-archive.mjs";
 
 // oxlint-disable-next-line t3code/no-global-process-runtime -- The trusted signing CLI validates its host before reading signing inputs.
 if (process.platform !== "darwin" || process.arch !== "arm64")
@@ -83,6 +84,13 @@ try {
     packageProvenance.length !== 2
   )
     throw new Error("Both standalone core and MCP packages are required.");
+  const linux = readLinuxCliArchive({
+    directory: input,
+    version: provenance.version,
+    sourceSha: provenance.sourceSha,
+    run,
+    stat: NodeFS.lstatSync,
+  });
   const helper = NodePath.join(temporary, "import-identity");
   run("/usr/bin/swiftc", [
     NodePath.join(controller, "import-signing-identity.swift"),
@@ -258,6 +266,12 @@ try {
   for (const { name, archivePath } of packages) {
     NodeFS.copyFileSync(archivePath, NodePath.join(output, name));
   }
+  NodeFS.copyFileSync(linux.archivePath, NodePath.join(output, linux.name));
+  const linuxBytes = NodeFS.readFileSync(NodePath.join(output, linux.name));
+  NodeFS.writeFileSync(
+    NodePath.join(output, "SHA256SUMS"),
+    `${sha256(linuxBytes)}  ${linux.name}\n`,
+  );
   const zip = NodeFS.readFileSync(NodePath.join(output, zipName));
   NodeFS.writeFileSync(
     NodePath.join(output, "nightly-mac.yml"),
@@ -278,6 +292,7 @@ try {
         teamId: team,
         notarizationId: notarization.id,
         packages: packageProvenance,
+        cli: linux.provenance,
         assets,
       },
       null,

@@ -77,7 +77,7 @@ jobs:
         run: vp install --frozen-lockfile
       - name: Focused extraction, profile and release checks
         run: |
-          node --experimental-test-module-mocks --test scripts/azure-nightly/release-policy.test.mjs scripts/azure-nightly/integrate.test.mjs scripts/azure-nightly/sign.test.mjs scripts/azure-nightly/publish.test.mjs
+          node --experimental-test-module-mocks --test scripts/azure-nightly/release-policy.test.mjs scripts/azure-nightly/integrate.test.mjs scripts/azure-nightly/sign.test.mjs scripts/azure-nightly/publish.test.mjs scripts/azure-nightly/cli-archive.test.mjs
           python3 -B -m unittest discover -s scripts/azure-nightly -p test_extract_app.py
           vp test run scripts/build-desktop-artifact.test.ts -t 'unreviewed Electron|omits inherited passkey'
           vp test run apps/desktop/src/app/DesktopForkProfile.test.ts apps/desktop/src/app/DesktopUserData.test.ts apps/desktop/src/app/DesktopClerk.test.ts apps/desktop/src/electron/ElectronUpdater.test.ts scripts/azure-nightly/artifact-export.test.ts packages/shared/src/providerAuthReturnUrl.test.ts packages/shared/src/codexAuthHandoff.test.ts packages/shared/src/promptLinks.test.ts apps/server/src/auth/EnvironmentAuth.test.ts
@@ -129,9 +129,71 @@ jobs:
           path: unsigned/*
           if-no-files-found: error
 
+  linux-cli:
+    if: needs.integrate.outputs.should_build == 'true'
+    needs: integrate
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.T3CODE_CLERK_PUBLISHABLE_KEY }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.T3CODE_CLERK_JWT_TEMPLATE }}
+      T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ vars.T3CODE_CLERK_CLI_OAUTH_CLIENT_ID }}
+      T3CODE_RELAY_URL: ${{ vars.T3CODE_RELAY_URL }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.integrate.outputs.source_sha }}
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb
+        with:
+          node-version-file: package.json
+          run-install: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+      - name: Install native build tools without release credentials
+        run: sudo apt-get update && sudo apt-get install -y build-essential python3 pkg-config libsecret-1-dev
+      - name: Install candidate dependencies
+        run: vp install --frozen-lockfile
+      - name: Check release, cache, SSH and combined updater behavior
+        run: |
+          node --experimental-test-module-mocks --test scripts/azure-nightly/cli-archive.test.mjs scripts/azure-nightly/publish.test.mjs
+          vp test run packages/shared/src/cliRelease.test.ts scripts/lib/cli-release-provenance.test.ts apps/server/src/cloud/pinnedRuntime.test.ts apps/server/src/cloud/bootService.test.ts apps/server/src/cloud/selfUpdate.test.ts apps/server/src/serviceLauncher.test.ts packages/ssh/src/tunnel.test.ts scripts/install.test.ts scripts/build-npm-launcher.test.ts apps/web/src/components/sidebar/updateEverything.logic.test.ts apps/web/src/components/sidebar/useUpdateEverything.test.ts
+      - name: Build same-source web, server and resource monitor
+        env:
+          FORK_VERSION: ${{ needs.integrate.outputs.version }}
+          SOURCE_SHA: ${{ needs.integrate.outputs.source_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          node scripts/update-release-package-versions.ts "$FORK_VERSION"
+          vp run --filter @t3tools/web build
+          node apps/server/scripts/cli.ts build --verbose
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$RUNNER_TEMP/cli-resource-monitor/linux-x64/"
+      - name: Build native Node SEA
+        env:
+          VP_NODE_VERSION: "26.8.2"
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+      - name: Package and smoke-test Linux without signing credentials
+        env:
+          FORK_VERSION: ${{ needs.integrate.outputs.version }}
+          SOURCE_SHA: ${{ needs.integrate.outputs.source_sha }}
+        run: |
+          node scripts/build-cli-archive.ts --platform linux --arch x64 --version "$FORK_VERSION" --source-sha "$SOURCE_SHA" --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" --output-dir "$RUNNER_TEMP/linux-cli"
+          node scripts/smoke-cli-archive.ts --archive "$RUNNER_TEMP/linux-cli/t3-$FORK_VERSION-linux-x64.tar.gz" --expect-version "$FORK_VERSION"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: azure-nightly-linux
+          path: ${{ runner.temp }}/linux-cli/*
+          if-no-files-found: error
+
   sign-and-publish:
     if: needs.integrate.outputs.should_build == 'true'
-    needs: [integrate, candidate]
+    needs: [integrate, candidate, linux-cli]
     runs-on: macos-15
     environment: azure-nightly-release
     permissions:
@@ -149,6 +211,10 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: azure-nightly-unsigned
+          path: unsigned
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: azure-nightly-linux
           path: unsigned
       - name: Sign and notarize artifacts without executing candidate code
         env:

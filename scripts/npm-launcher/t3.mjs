@@ -15,6 +15,8 @@ const { version } = JSON.parse(
   fs.readFileSync(path.join(import.meta.dirname, "../package.json"), "utf8"),
 );
 
+const releaseRepository = "__T3_RELEASE_REPOSITORY__";
+
 const SUPPORTED = ["darwin-arm64", "linux-arm64", "linux-x64", "win32-arm64", "win32-x64"];
 
 function t3Home() {
@@ -70,7 +72,8 @@ async function download(url, file) {
 async function install(dir, key) {
   const archive = `t3-${version}-${key}.${process.platform === "win32" ? "zip" : "tar.gz"}`;
   const base = (
-    process.env.T3CODE_RELEASE_BASE_URL || "https://github.com/pingdotgg/t3code/releases/download"
+    process.env.T3CODE_RELEASE_BASE_URL ||
+    `https://github.com/${releaseRepository}/releases/download`
   ).replace(/\/+$/, "");
   const sums = await (await get(`${base}/v${version}/SHA256SUMS`)).text();
   const expected = /^([0-9a-f]{64})\s+\*?(.+)$/im;
@@ -80,11 +83,11 @@ async function install(dir, key) {
     .find((m) => m && m[2] === archive);
   if (!line) throw new Error(`${archive} is not listed in the release's SHA256SUMS`);
 
-  // Extract beside the final folder and rename it into place, so an
-  // interrupted download never leaves a half-installed version behind.
   fs.mkdirSync(path.dirname(dir), { recursive: true });
-  const staging = fs.mkdtempSync(`${dir}.staging-`);
+  const container = fs.mkdtempSync(path.join(path.dirname(dir), ".content-"));
+  const staging = path.join(fs.realpathSync(container), version);
   try {
+    fs.mkdirSync(staging);
     const file = path.join(staging, archive);
     if ((await download(`${base}/v${version}/${archive}`, file)) !== line[1].toLowerCase()) {
       throw new Error(`checksum mismatch for ${archive}`);
@@ -97,36 +100,61 @@ async function install(dir, key) {
     });
     if (extract.status !== 0) throw new Error(`could not extract ${archive}`);
     fs.rmSync(file);
+    if (!hasReleaseMetadata(staging))
+      throw new Error("downloaded CLI archive has invalid fork origin or provenance");
     fs.writeFileSync(path.join(staging, ".install-complete"), `${version}\n`);
     publish(staging, dir);
   } finally {
-    fs.rmSync(staging, { recursive: true, force: true });
+    let publishedContent = false;
+    if (process.platform !== "win32") {
+      try {
+        publishedContent = fs.readlinkSync(dir) === staging;
+      } catch {}
+    }
+    if (!publishedContent) fs.rmSync(container, { recursive: true, force: true });
   }
 }
 
-const isComplete = (dir) => {
+const hasReleaseMetadata = (dir) => {
   try {
-    return fs.readFileSync(path.join(dir, ".install-complete"), "utf8").trim() === version;
+    const origin = fs.readFileSync(path.join(dir, ".release-origin"), "utf8");
+    const metadata = JSON.parse(
+      fs.readFileSync(path.join(dir, ".release-provenance.json"), "utf8"),
+    );
+    return (
+      (origin === releaseRepository || origin === `${releaseRepository}\n`) &&
+      metadata.repository === releaseRepository &&
+      metadata.version === version &&
+      metadata.platformKey === `${process.platform}-${process.arch}` &&
+      typeof metadata.sourceSha === "string" &&
+      /^[0-9a-f]{40}$/.test(metadata.sourceSha)
+    );
   } catch {
     return false;
   }
 };
 
-/**
- * Moves a finished staging folder to `dir`. Rename never replaces an existing
- * folder, so a complete install another launcher (or `t3 update`) published
- * first is kept, never deleted from under a running process. Only a folder
- * without the completion marker, left by an interrupted older installer, is
- * cleared before trying again.
- */
+const isComplete = (dir) => {
+  try {
+    return (
+      fs.statSync(path.join(dir, process.platform === "win32" ? "t3.exe" : "t3")).isFile() &&
+      fs.readFileSync(path.join(dir, ".install-complete"), "utf8").trim() === version &&
+      hasReleaseMetadata(dir)
+    );
+  } catch {
+    return false;
+  }
+};
+
 function publish(staging, dir) {
   try {
-    fs.renameSync(staging, dir);
+    if (process.platform === "win32") fs.renameSync(staging, dir);
+    else fs.symlinkSync(staging, dir);
   } catch (error) {
     if (isComplete(dir)) return;
-    if (!fs.existsSync(dir)) throw error;
-    fs.rmSync(dir, { recursive: true, force: true });
-    fs.renameSync(staging, dir);
+    throw new Error(`preserving runtime collision or failed publication at ${dir}`, {
+      cause: error,
+    });
   }
 }
 
@@ -135,11 +163,15 @@ async function main() {
   if (!SUPPORTED.includes(key)) {
     throw new Error(
       `no T3 Code CLI build is available for ${key} (supported: ${SUPPORTED.join(", ")}).\n` +
-        "The desktop app is at https://github.com/pingdotgg/t3code/releases",
+        `The desktop app is at https://github.com/${releaseRepository}/releases`,
     );
   }
   const dir = path.join(t3Home(), "runtime", "versions", version);
-  if (!isComplete(dir)) await install(dir, key);
+  if (!isComplete(dir)) {
+    if (fs.existsSync(dir)) throw new Error(`preserving runtime collision at ${dir}`);
+    await install(dir, key);
+  }
+  if (!isComplete(dir)) throw new Error("CLI runtime has invalid fork origin or provenance");
 
   // A service launcher talks to its server over IPC; pass that channel and
   // signals through. In a terminal, Ctrl-C already reaches the child directly,

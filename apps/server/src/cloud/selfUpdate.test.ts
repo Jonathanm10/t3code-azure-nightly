@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { ServerSelfUpdateError, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { CLI_RELEASE_REPOSITORY } from "@t3tools/shared/cliRelease";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -19,6 +20,7 @@ import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 import * as ServerSelfUpdate from "./selfUpdate.ts";
 
 interface HarnessOptions {
+  readonly releaseOrigin?: string;
   readonly mode?: "web" | "desktop";
   readonly managed?: boolean;
   readonly preflight?: "ready" | "blocked";
@@ -60,6 +62,23 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
           const stagingDir = input.args[input.args.indexOf("-C") + 1];
           if (stagingDir === undefined) return yield* Effect.die("missing tar target");
           yield* fs.writeFileString(path.join(stagingDir, "t3"), "#!/bin/sh\n").pipe(Effect.orDie);
+          yield* fs
+            .writeFileString(
+              path.join(stagingDir, ".release-origin"),
+              `${options.releaseOrigin ?? CLI_RELEASE_REPOSITORY}\n`,
+            )
+            .pipe(Effect.orDie);
+          yield* fs
+            .writeFileString(
+              path.join(stagingDir, ".release-provenance.json"),
+              JSON.stringify({
+                repository: CLI_RELEASE_REPOSITORY,
+                version: "1.1.0",
+                sourceSha: "a".repeat(40),
+                platformKey: "linux-x64",
+              }),
+            )
+            .pipe(Effect.orDie);
           return {
             stdout: "",
             stderr: "",
@@ -125,6 +144,15 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
 });
 
 it.layer(NodeServices.layer)("server self update", (it) => {
+  it.effect("rejects an official archive before preflight and launcher handoff", () =>
+    Effect.gen(function* () {
+      const { selfUpdate, order } = yield* makeHarness({ releaseOrigin: "pingdotgg/t3code" });
+      const error = yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip);
+      expect(error.reason).toBe("Could not prepare t3@1.1.0.");
+      expect(order).toEqual(["download", "extract"]);
+    }),
+  );
+
   it.effect("marks running threads at the boot-service handoff", () =>
     Effect.gen(function* () {
       const events: string[] = [];

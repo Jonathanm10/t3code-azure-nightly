@@ -13,6 +13,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProcessRunner from "../processRunner.ts";
 import * as BootService from "./bootService.ts";
 import { pinnedRuntimePaths } from "./pinnedRuntime.ts";
+import { CLI_RELEASE_REPOSITORY } from "@t3tools/shared/cliRelease";
 import {
   parseServiceState,
   SERVICE_LAUNCHER_PROTOCOL,
@@ -134,10 +135,25 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-boot-service-test-" });
   const baseDir = path.join(home, ".t3");
   const statePath = path.join(baseDir, "runtime", "service-state.json");
+  const runtimeArch = platform === "darwin" ? "arm64" : "x64";
+  const writeMetadata = (directory: string, version: string) =>
+    Effect.all([
+      fs.writeFileString(path.join(directory, ".release-origin"), `${CLI_RELEASE_REPOSITORY}\n`),
+      fs.writeFileString(
+        path.join(directory, ".release-provenance.json"),
+        JSON.stringify({
+          repository: CLI_RELEASE_REPOSITORY,
+          version,
+          sourceSha: "a".repeat(40),
+          platformKey: `${platform}-${runtimeArch}`,
+        }),
+      ),
+    ]);
   const runtime = pinnedRuntimePaths(path, baseDir, "1.2.3", platform);
   yield* fs.makeDirectory(path.dirname(runtime.entryPath), { recursive: true });
   yield* fs.writeFileString(runtime.entryPath, "#!/bin/sh\n");
   yield* fs.writeFileString(runtime.sentinelPath, "1.2.3\n");
+  yield* writeMetadata(runtime.versionDir, "1.2.3");
 
   const commands: string[] = [];
   const timeouts = new Map<string, unknown>();
@@ -211,6 +227,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       yield* fs.makeDirectory(path.dirname(paths.entryPath), { recursive: true });
       yield* fs.writeFileString(paths.entryPath, "#!/bin/sh\n");
       yield* fs.writeFileString(paths.sentinelPath, `${cliVersion}\n`);
+      yield* writeMetadata(paths.versionDir, cliVersion);
       return yield* BootService.make({
         baseDir: serviceBaseDir,
         logsDir: path.join(serviceBaseDir, "userdata", "logs"),
@@ -222,6 +239,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       Effect.provide(
         Layer.mergeAll(
           Layer.succeed(HostProcess.Platform, platform),
+          Layer.succeed(HostProcess.Architecture, runtimeArch),
           Layer.succeed(HostProcess.UserId, 501),
           Layer.succeed(HostProcess.ExecutablePath, "/usr/bin/t3"),
           Layer.succeed(

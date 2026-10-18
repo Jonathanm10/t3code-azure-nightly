@@ -6,7 +6,7 @@ import {
   describeReadinessCause,
   waitForHttpReady as waitForHttpReadyShared,
 } from "@t3tools/shared/httpReadiness";
-import { cliReleaseDownloadBaseUrl } from "@t3tools/shared/cliRelease";
+import { CLI_RELEASE_METADATA_SHELL, cliReleaseDownloadBaseUrl } from "@t3tools/shared/cliRelease";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NetService from "@t3tools/shared/Net";
 import { extractJsonObject, fromLenientJson } from "@t3tools/shared/schemaJson";
@@ -455,9 +455,29 @@ fi
 # Unpacked into the pinned-runtime layout so \`t3 service install\` reuses it.
 T3_RELEASE_BASE_URL=@@T3_RELEASE_BASE_URL@@
 T3_RUNTIME_DIR="$HOME/.t3/runtime/versions/$T3_ARCHIVE_VERSION"
+@@T3_RELEASE_METADATA_SCRIPT@@
+case "$(uname -s)" in
+  Darwin) T3_PLATFORM="darwin" ;;
+  Linux) T3_PLATFORM="linux" ;;
+  *) printf 'Unsupported t3 archive operating system.\\n' >&2; exit 1 ;;
+esac
+case "$(uname -m)" in
+  arm64 | aarch64) T3_ARCH="arm64" ;;
+  x86_64 | amd64) T3_ARCH="x64" ;;
+  *) printf 'Unsupported t3 archive architecture.\\n' >&2; exit 1 ;;
+esac
 t3_runtime_ready() {
-  [ -x "$T3_RUNTIME_DIR/t3" ] && [ "$(cat "$T3_RUNTIME_DIR/.install-complete" 2>/dev/null)" = "$T3_ARCHIVE_VERSION" ]
+  [ -x "$T3_RUNTIME_DIR/t3" ] &&
+  [ "$(cat "$T3_RUNTIME_DIR/.install-complete" 2>/dev/null)" = "$T3_ARCHIVE_VERSION" ] &&
+  t3_release_metadata_matches "$T3_RUNTIME_DIR" "$T3_ARCHIVE_VERSION" "$T3_PLATFORM-$T3_ARCH"
 }
+t3_refuse_collision() {
+  printf 'Preserving runtime collision at %s; expected a complete %s release with matching metadata.\\n' "$T3_RUNTIME_DIR" "$T3_RELEASE_REPOSITORY" >&2
+  exit 1
+}
+if { [ -e "$T3_RUNTIME_DIR" ] || [ -L "$T3_RUNTIME_DIR" ]; } && ! t3_runtime_ready; then
+  t3_refuse_collision
+fi
 if ! t3_runtime_ready; then
   mkdir -p "$HOME/.t3/runtime/versions"
   # Concurrent launches (two clients, a retry racing a slow first run) must
@@ -499,19 +519,18 @@ if ! t3_runtime_ready; then
   trap 'rm -rf "$T3_LOCK"' EXIT
 fi
 if ! t3_runtime_ready; then
-  case "$(uname -s)" in
-    Darwin) T3_PLATFORM="darwin" ;;
-    Linux) T3_PLATFORM="linux" ;;
-    *) printf 'Remote host %s has no t3 release archive.\\n' "$(uname -s)" >&2; exit 1 ;;
-  esac
-  case "$(uname -m)" in
-    arm64 | aarch64) T3_ARCH="arm64" ;;
-    x86_64 | amd64) T3_ARCH="x64" ;;
-    *) printf 'Remote host %s has no t3 release archive.\\n' "$(uname -m)" >&2; exit 1 ;;
-  esac
+  if [ -e "$T3_RUNTIME_DIR" ] || [ -L "$T3_RUNTIME_DIR" ]; then t3_refuse_collision; fi
   T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"
-  T3_STAGING="$(mktemp -d "$HOME/.t3/runtime/versions/.staging-XXXXXX")"
-  trap 'rm -rf "$T3_STAGING" "$T3_LOCK"' EXIT
+  T3_CONTAINER="$(mktemp -d "$HOME/.t3/runtime/versions/.content-XXXXXX")"
+  T3_STAGING="$T3_CONTAINER/$T3_ARCHIVE_VERSION"
+  t3_cleanup_install() {
+    if [ "$(readlink "$T3_RUNTIME_DIR" 2>/dev/null || true)" != "$T3_STAGING" ]; then
+      rm -rf "$T3_CONTAINER"
+    fi
+    rm -rf "$T3_LOCK"
+  }
+  trap t3_cleanup_install EXIT
+  mkdir "$T3_STAGING"
   t3_fetch() {
     if command -v curl >/dev/null 2>&1; then curl -fsSL --connect-timeout 30 --max-time "$3" "$1" -o "$2"
     elif command -v wget >/dev/null 2>&1; then wget -q --timeout=30 --tries=1 "$1" -O "$2"
@@ -531,19 +550,25 @@ if ! t3_runtime_ready; then
   fi
   tar -xzf "$T3_STAGING/$T3_ARCHIVE" -C "$T3_STAGING" --strip-components=1
   rm -f "$T3_STAGING/$T3_ARCHIVE" "$T3_STAGING/SHA256SUMS"
+  if ! t3_release_metadata_matches "$T3_STAGING" "$T3_ARCHIVE_VERSION" "$T3_PLATFORM-$T3_ARCH"; then
+    printf 'Invalid %s runtime origin or provenance.\\n' "$T3_RELEASE_REPOSITORY" >&2; exit 1
+  fi
   # Prove the binary runs here (libc, arch) before marking it ready, or every
   # later launch would exec a broken install instead of retrying.
   if ! "$T3_STAGING/t3" --version >/dev/null 2>&1; then
     printf 'The t3 %s executable does not run on this host.\\n' "$T3_ARCHIVE_VERSION" >&2; exit 1
   fi
   printf '%s\\n' "$T3_ARCHIVE_VERSION" > "$T3_STAGING/.install-complete"
-  rm -rf "$T3_RUNTIME_DIR"
-  mv "$T3_STAGING" "$T3_RUNTIME_DIR"
+  if ! ln -s "$T3_STAGING" "$HOME/.t3/runtime/versions/"; then
+    t3_runtime_ready || t3_refuse_collision
+  fi
+  t3_cleanup_install
 fi
 if [ -n "\${T3_LOCK:-}" ]; then
   rm -rf "$T3_LOCK"
   trap - EXIT
 fi
+t3_runtime_ready || t3_refuse_collision
 exec "$T3_RUNTIME_DIR/t3" "$@"
 `;
 
@@ -832,6 +857,7 @@ export function buildRemoteT3RunnerScript(input?: RemoteT3RunnerOptions): string
       T3_NODE_SCRIPT_PATH: shellSingleQuote(nodeScriptPath),
       T3_ARCHIVE_VERSION: shellSingleQuote(archiveVersion),
       T3_RELEASE_BASE_URL: shellSingleQuote(releaseBaseUrl),
+      T3_RELEASE_METADATA_SCRIPT: CLI_RELEASE_METADATA_SHELL,
       T3_ARCHIVE_LOCK_WAIT_SECONDS: String(REMOTE_ARCHIVE_LOCK_WAIT_SECONDS),
       T3_ARCHIVE_DOWNLOAD_SECONDS: String(REMOTE_ARCHIVE_DOWNLOAD_SECONDS),
       T3_ARCHIVE_CHECKSUMS_SECONDS: String(REMOTE_ARCHIVE_CHECKSUMS_SECONDS),

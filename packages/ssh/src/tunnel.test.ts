@@ -1,9 +1,12 @@
 import * as NodeNet from "node:net";
+// @effect-diagnostics-next-line nodeBuiltinImport:off - lstat checks the symlink's own inode, which Effect FileSystem.stat cannot expose.
+import * as NodeFS from "node:fs";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { CLI_RELEASE_REPOSITORY } from "@t3tools/shared/cliRelease";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -108,7 +111,7 @@ describe("ssh tunnel scripts", () => {
     assert.include(script, "T3_NODE_SCRIPT_PATH=''");
     assert.include(
       script,
-      "T3_RELEASE_BASE_URL='https://github.com/pingdotgg/t3code/releases/download'",
+      "T3_RELEASE_BASE_URL='https://github.com/Jonathanm10/t3code-azure-nightly/releases/download'",
     );
     assert.include(script, 'T3_RUNTIME_DIR="$HOME/.t3/runtime/versions/$T3_ARCHIVE_VERSION"');
     assert.include(script, 'T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"');
@@ -820,12 +823,12 @@ describe("remote port picker", () => {
   );
 });
 
-const runScript = (home: string, args: ReadonlyArray<string>) =>
+const runScript = (home: string, args: ReadonlyArray<string>, env: Record<string, string> = {}) =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const child = yield* spawner.spawn(
       ChildProcess.make("sh", args, {
-        env: { PATH: process.env.PATH ?? "", HOME: home },
+        env: { PATH: process.env.PATH ?? "", HOME: home, ...env },
         extendEnv: false,
       }),
     );
@@ -852,7 +855,7 @@ const runScript = (home: string, args: ReadonlyArray<string>) =>
     return { stdout, stderr, exitCode };
   });
 
-describe("archive runner script", () => {
+describe.skipIf(HostProcess.Platform.defaultValue() === "win32")("archive runner script", () => {
   const hostPlatform = HostProcess.Platform.defaultValue();
   const hostArch = HostProcess.Architecture.defaultValue();
   const windowsHost = hostPlatform === "win32";
@@ -860,17 +863,34 @@ describe("archive runner script", () => {
 
   const runRunner = (home: string, runner: string) => runScript(home, [runner, "--version"]);
 
-  const makeMirror = Effect.fn("makeMirror")(function* (root: string) {
+  const makeMirror = Effect.fn("makeMirror")(function* (
+    root: string,
+    origin: string | undefined = CLI_RELEASE_REPOSITORY,
+    metadataVersion = archiveVersion,
+  ) {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const platform = hostPlatform === "darwin" ? "darwin" : "linux";
     const arch = hostArch === "arm64" ? "arm64" : "x64";
     const stem = `t3-${archiveVersion}-${platform}-${arch}`;
     const stage = `${root}/stage/${stem}`;
     const release = `${root}/mirror/v${archiveVersion}`;
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.makeDirectory(`${stage}/node_modules/native`, { recursive: true });
+    yield* fs.writeFileString(`${stage}/node_modules/native/payload`, "native-content");
+    if (origin !== undefined) yield* fs.writeFileString(`${stage}/.release-origin`, `${origin}\n`);
+    yield* fs.writeFileString(
+      `${stage}/.release-provenance.json`,
+      JSON.stringify({
+        repository: CLI_RELEASE_REPOSITORY,
+        version: metadataVersion,
+        sourceSha: "a".repeat(40),
+        platformKey: `${platform}-${arch}`,
+      }),
+    );
     const script = [
       "set -eu",
       `mkdir -p '${stage}' '${release}'`,
-      `printf '#!/bin/sh\\necho t3 v${archiveVersion}\\n' > '${stage}/t3'`,
+      `printf '#!/bin/sh\\ntouch "$HOME/candidate-executed"\\necho t3 v${archiveVersion}\\n' > '${stage}/t3'`,
       `chmod +x '${stage}/t3'`,
       `tar -czf '${release}/${stem}.tar.gz' -C '${root}/stage' '${stem}'`,
       `cd '${release}' && (sha256sum '${stem}.tar.gz' 2>/dev/null || shasum -a 256 '${stem}.tar.gz') > SHA256SUMS`,
@@ -879,6 +899,151 @@ describe("archive runner script", () => {
     assert.equal(Number(yield* child.exitCode), 0);
     return `file://${root}/mirror`;
   });
+
+  it.effect.each(["", "pingdotgg/t3code"])(
+    "refuses cached foreign or unmarked runtimes without executing or removing them (%s)",
+    (origin) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-collision-" });
+        const home = `${root}/home`;
+        const dir = `${home}/.t3/runtime/versions/${archiveVersion}`;
+        yield* fs.makeDirectory(dir, { recursive: true });
+        yield* fs.writeFileString(`${dir}/t3`, '#!/bin/sh\ntouch "$HOME/cached-executed"\n');
+        yield* fs.chmod(`${dir}/t3`, 0o755);
+        yield* fs.writeFileString(`${dir}/.install-complete`, archiveVersion);
+        if (origin) yield* fs.writeFileString(`${dir}/.release-origin`, origin);
+        const runner = `${root}/runner.sh`;
+        yield* fs.writeFileString(
+          runner,
+          SshTunnel.buildRemoteT3RunnerScript({
+            archiveVersion,
+            releaseBaseUrl: "file:///must-not-download",
+          }),
+        );
+        const result = yield* runRunner(home, runner);
+        assert.notEqual(result.exitCode, 0);
+        assert.include(result.stderr, "Preserving runtime collision");
+        assert.isFalse(yield* fs.exists(`${home}/cached-executed`));
+        assert.equal(yield* fs.readFileString(`${dir}/.install-complete`), archiveVersion);
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each(["missing", "foreign", "wrong-version"])(
+    "refuses staged metadata before --version, even through a mirror (%s)",
+    (kind) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-origin-" });
+        const releaseBaseUrl = yield* makeMirror(
+          root,
+          kind === "foreign" ? "pingdotgg/t3code" : CLI_RELEASE_REPOSITORY,
+          kind === "wrong-version" ? "9.9.9" : archiveVersion,
+        );
+        if (kind === "missing") {
+          const platformKey = `${hostPlatform === "darwin" ? "darwin" : "linux"}-${hostArch}`;
+          const stem = `t3-${archiveVersion}-${platformKey}`;
+          yield* fs.remove(`${root}/stage/${stem}/.release-origin`);
+          const rebuilt = yield* runScript(root, [
+            "-c",
+            `tar -czf '${root}/mirror/v${archiveVersion}/${stem}.tar.gz' -C '${root}/stage' '${stem}' && cd '${root}/mirror/v${archiveVersion}' && (sha256sum '${stem}.tar.gz' 2>/dev/null || shasum -a 256 '${stem}.tar.gz') > SHA256SUMS`,
+          ]);
+          assert.equal(rebuilt.exitCode, 0, rebuilt.stderr);
+        }
+        const home = `${root}/home`;
+        yield* fs.makeDirectory(home);
+        const runner = `${root}/runner.sh`;
+        yield* fs.writeFileString(
+          runner,
+          SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl }),
+        );
+        const result = yield* runRunner(home, runner);
+        assert.notEqual(result.exitCode, 0);
+        assert.include(result.stderr, "origin or provenance");
+        assert.isFalse(yield* fs.exists(`${home}/candidate-executed`));
+        assert.deepEqual(yield* fs.readDirectory(`${home}/.t3/runtime/versions`), []);
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect.each(["empty", "foreign", "dangling", "valid", "published-error"])(
+    "preserves late publication targets and only removes its own content (%s)",
+    (kind) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-late-" });
+        const releaseBaseUrl = yield* makeMirror(root);
+        const home = `${root}/home`;
+        const versions = `${home}/.t3/runtime/versions`;
+        const target = `${versions}/${archiveVersion}`;
+        const wrapper = `${root}/wrappers`;
+        yield* fs.makeDirectory(home);
+        yield* fs.makeDirectory(wrapper);
+        yield* fs.writeFileString(
+          `${wrapper}/ln`,
+          `#!${process.execPath}
+const fs = require("node:fs"), path = require("node:path"), cp = require("node:child_process");
+const args = process.argv.slice(2), source = args.at(-2);
+const target = ${JSON.stringify(target)}, kind = ${JSON.stringify(kind)}, home = ${JSON.stringify(home)};
+if (kind !== "published-error") {
+  if (kind === "dangling") fs.symlinkSync(path.join(home, "missing"), target);
+  else if (kind === "empty") fs.mkdirSync(target);
+  else {
+    fs.cpSync(source, target, { recursive: true });
+    if (kind === "foreign") {
+      fs.writeFileSync(path.join(target, ".release-origin"), "pingdotgg/t3code");
+      fs.writeFileSync(path.join(target, "t3"), '#!/bin/sh\\ntouch "' + home + '/foreign-executed"\\n');
+    }
+  }
+  fs.writeFileSync(path.join(home, "inode"), String(fs.lstatSync(target).ino));
+  fs.writeFileSync(path.join(home, "children"), kind === "dangling" ? "" : fs.readdirSync(target).sort().join("\\n"));
+}
+const result = cp.spawnSync("/bin/ln", args, { stdio: "inherit" });
+process.exit(kind === "published-error" ? 1 : result.status ?? 1);
+`,
+        );
+        yield* fs.chmod(`${wrapper}/ln`, 0o755);
+        const runner = `${root}/runner.sh`;
+        yield* fs.writeFileString(
+          runner,
+          SshTunnel.buildRemoteT3RunnerScript({ archiveVersion, releaseBaseUrl }),
+        );
+        const result = yield* runScript(home, [runner, "--version"], {
+          PATH: `${wrapper}:${process.env.PATH}`,
+        });
+        const accepted = kind === "valid" || kind === "published-error";
+        assert.equal(result.exitCode === 0, accepted, result.stderr);
+        assert.isFalse(yield* fs.exists(`${home}/foreign-executed`));
+        if (kind === "published-error") {
+          const content = yield* fs.readLink(target);
+          assert.equal(
+            yield* fs.readFileString(`${content}/.install-complete`),
+            `${archiveVersion}\n`,
+          );
+          assert.equal((yield* fs.readDirectory(versions)).length, 2);
+          assert.equal(
+            yield* fs.readFileString(`${content}/node_modules/native/payload`),
+            "native-content",
+          );
+        } else {
+          assert.equal(
+            NodeFS.lstatSync(target).ino,
+            Number(yield* fs.readFileString(`${home}/inode`)),
+          );
+          if (kind === "dangling") assert.equal(yield* fs.readLink(target), `${home}/missing`);
+          else
+            assert.equal(
+              (yield* fs.readDirectory(target)).sort().join("\n"),
+              yield* fs.readFileString(`${home}/children`),
+            );
+          assert.deepEqual(yield* fs.readDirectory(versions), [archiveVersion]);
+        }
+        if (accepted) {
+          const restart = yield* runScript(home, [runner, "__service-preflight"]);
+          assert.equal(restart.exitCode, 0, restart.stderr);
+          assert.include(restart.stdout, `t3 v${archiveVersion}`);
+        } else assert.include(result.stderr, "Preserving runtime collision");
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   it.effect.skipIf(windowsHost)(
     "installs once when several launches race, and reclaims stale locks",
@@ -904,7 +1069,14 @@ describe("archive runner script", () => {
           assert.include(result.stdout, `t3 v${archiveVersion}`);
         }
         const versionsDir = `${home}/.t3/runtime/versions`;
-        assert.deepEqual(yield* fs.readDirectory(versionsDir), [archiveVersion]);
+        const content = yield* fs.readLink(`${versionsDir}/${archiveVersion}`);
+        assert.match(content, /\/\.content-[^/]+\/[^/]+$/);
+        assert.deepEqual(
+          (yield* fs.readDirectory(versionsDir)).sort(),
+          [content.split("/").at(-2), archiveVersion].sort(),
+        );
+        const restart = yield* runScript(home, [runner, "__service-preflight"]);
+        assert.equal(restart.exitCode, 0, restart.stderr);
         assert.equal(
           (yield* fs.readFileString(`${versionsDir}/${archiveVersion}/.install-complete`)).trim(),
           archiveVersion,

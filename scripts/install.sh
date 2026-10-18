@@ -6,7 +6,7 @@
 #
 # Environment:
 #   T3CODE_CHANNEL           release train to follow: stable, nightly, or preview
-#                            (default: stable; preview is a maintainers' test train)
+#                            (default: nightly; preview is a maintainers' test train)
 #   T3CODE_VERSION           exact version to install (overrides T3CODE_CHANNEL)
 #   T3CODE_HOME              T3 home directory (default: ~/.t3)
 #   T3CODE_INSTALL_BIN_DIR   where the `t3` symlink goes (default: ~/.local/bin)
@@ -17,7 +17,7 @@
 # instead of fetching the release again.
 set -eu
 
-repo="pingdotgg/t3code"
+repo="Jonathanm10/t3code-azure-nightly"
 base_url="${T3CODE_RELEASE_BASE_URL:-https://github.com/${repo}/releases/download}"
 t3_home="${T3CODE_HOME:-$HOME/.t3}"
 bin_dir="${T3CODE_INSTALL_BIN_DIR:-$HOME/.local/bin}"
@@ -142,7 +142,7 @@ else
   fail "sha256sum or shasum is required"
 fi
 
-channel="${T3CODE_CHANNEL:-stable}"
+channel="${T3CODE_CHANNEL:-nightly}"
 version="${T3CODE_VERSION:-}"
 if [ -z "$version" ]; then
   # Tags are v<semver>; the channel is the prerelease identifier, or none for
@@ -165,7 +165,7 @@ case "$version" in
       "t3 ${version} is a preview build." \
       "  Preview builds are cut by maintainers from unreleased branches to exercise the release" \
       "  pipeline. They can be broken, receive no fixes, and are never offered as updates." \
-      "  Set T3CODE_CHANNEL=stable (the default) for a supported build." >&2
+      "  Set T3CODE_CHANNEL=nightly (the default) for Azure Nightly." >&2
     if [ "$channel" != "preview" ] && [ -z "${T3CODE_VERSION:-}" ]; then
       fail "refusing a preview build that was not explicitly requested"
     fi
@@ -175,17 +175,46 @@ esac
 stem="t3-${version}-${platform}-${arch}"
 archive="${stem}.tar.gz"
 versions_dir="${t3_home}/runtime/versions"
+mkdir -p "$versions_dir"
+versions_dir="$(cd "$versions_dir" && pwd -P)"
 target_dir="${versions_dir}/${version}"
+T3_RELEASE_REPOSITORY="$repo"
+t3_release_metadata_matches() {
+  _t3_release_dir="$1"
+  _t3_release_version="$2"
+  _t3_release_platform="$3"
+  [ "$(cat "$_t3_release_dir/.release-origin" 2>/dev/null)" = "$T3_RELEASE_REPOSITORY" ] || return 1
+  _t3_release_json="$(cat "$_t3_release_dir/.release-provenance.json" 2>/dev/null)" || return 1
+  _t3_release_sha="$(printf '%s\n' "$_t3_release_json" | sed -n 's/^.*"sourceSha":"\([0-9a-f]\{40\}\)".*$/\1/p')"
+  [ -n "$_t3_release_sha" ] || return 1
+  [ "$_t3_release_json" = "$(printf '{"repository":"%s","version":"%s","sourceSha":"%s","platformKey":"%s"}' "$T3_RELEASE_REPOSITORY" "$_t3_release_version" "$_t3_release_sha" "$_t3_release_platform")" ]
+}
+runtime_ready() {
+  [ -x "$target_dir/t3" ] &&
+  [ "$(cat "$target_dir/.install-complete" 2>/dev/null)" = "$version" ] &&
+  t3_release_metadata_matches "$target_dir" "$version" "$platform-$arch"
+}
 
-if [ -f "${target_dir}/.install-complete" ] && [ "$(cat "${target_dir}/.install-complete")" = "$version" ]; then
+if runtime_ready; then
   step "Version ${version} is already downloaded."
 else
-  mkdir -p "$versions_dir"
-  staging="$(mktemp -d "${versions_dir}/.staging-XXXXXX")"
+  if [ -e "$target_dir" ] || [ -L "$target_dir" ]; then
+    fail "preserving runtime collision at $target_dir; expected a complete $repo release with matching metadata"
+  fi
+  staging_container="$(mktemp -d "${versions_dir}/.content-XXXXXX")"
+  staging="${staging_container}/${version}"
   download_pid=
-  trap '[ -z "$download_pid" ] || { kill "$download_pid" 2>/dev/null || true; wait "$download_pid" 2>/dev/null || true; }; rm -rf "$staging"' EXIT
+  cleanup_install() {
+    [ -z "$download_pid" ] || { kill "$download_pid" 2>/dev/null || true; wait "$download_pid" 2>/dev/null || true; }
+    # Keep published content even if a signal arrives immediately after ln.
+    if [ "$(readlink "$target_dir" 2>/dev/null || true)" != "$staging" ]; then
+      rm -rf "$staging_container"
+    fi
+  }
+  trap cleanup_install EXIT
   trap 'printf "\n" >&2; exit 130' INT
   trap 'printf "\n" >&2; exit 143' TERM
+  mkdir "$staging"
 
   if "$interactive"; then printf '\r\033[2K' >&2; fi
   printf '  %sInstalling%s T3 Code %s%s%s\n\n' "$muted" "$reset" "$bold" "$version" "$reset" >&2
@@ -208,11 +237,15 @@ else
   step "Extracting T3 Code..."
   tar -xzf "${staging}/${archive}" -C "$staging" --strip-components=1
   rm -f "${staging}/${archive}" "${staging}/SHA256SUMS"
+  t3_release_metadata_matches "$staging" "$version" "$platform-$arch" || fail "invalid $repo runtime origin or provenance"
   "${staging}/t3" --version >/dev/null || fail "the downloaded executable does not run"
   printf '%s\n' "$version" > "${staging}/.install-complete"
 
-  rm -rf "$target_dir"
-  mv "$staging" "$target_dir"
+  # The parent operand makes ln create VERSION exclusively, never inside it.
+  if ! ln -s "$staging" "$versions_dir/"; then
+    runtime_ready || fail "preserving runtime collision at $target_dir"
+  fi
+  cleanup_install
   trap - EXIT
 fi
 
