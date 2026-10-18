@@ -13,11 +13,15 @@ import * as Scope from "effect/Scope";
 import * as Electron from "electron";
 
 export const DESKTOP_HOST = "app";
-const DESKTOP_PRODUCTION_SCHEME = "t3code-azure";
-const DESKTOP_DEVELOPMENT_SCHEME = "t3code-azure-dev";
+const DESKTOP_PRODUCTION_SCHEME = "t3code";
+const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
 
 export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
+}
+
+export function getDesktopSchemes(isDevelopment: boolean): readonly [string, string] {
+  return [getDesktopScheme(isDevelopment), isDevelopment ? "t3code-azure-dev" : "t3code-azure"];
 }
 
 function getDesktopOrigin(isDevelopment: boolean): string {
@@ -114,6 +118,10 @@ function withContentSecurityPolicy(response: Response, policy: string): Response
  */
 function registerDesktopSchemePrivilegesSync(): void {
   Electron.protocol.registerSchemesAsPrivileged([
+    ...["t3code-azure", "t3code-azure-dev"].map((scheme) => ({
+      scheme,
+      privileges: { standard: true, secure: true },
+    })),
     {
       scheme: DESKTOP_PRODUCTION_SCHEME,
       privileges: {

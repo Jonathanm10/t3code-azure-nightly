@@ -64,47 +64,49 @@ export const make = Effect.gen(function* () {
     if (linux !== null) {
       // The portal also requires a valid desktop entry. An AppImage update may
       // have removed the executable referenced by the previous launch's entry.
-      try {
-        const applicationsDir = NodePath.posix.join(
-          process.env.XDG_DATA_HOME?.trim() ||
-            NodePath.posix.join(homeDirectory, ".local", "share"),
-          "applications",
-        );
-        NodeFS.mkdirSync(applicationsDir, { recursive: true });
-        const iconPath = Electron.app.isPackaged
-          ? NodePath.posix.join(
-              applicationsDir,
-              "..",
-              "icons",
-              `${linux.linuxDesktopEntryName}.png`,
-            )
-          : undefined;
-        if (iconPath !== undefined) {
-          try {
-            NodeFS.mkdirSync(NodePath.posix.dirname(iconPath), { recursive: true });
-            NodeFS.copyFileSync(
-              NodePath.posix.join(
-                Electron.app.getAppPath(),
-                "apps/desktop/prod-resources/icon.png",
-              ),
-              iconPath,
-            );
-          } catch {}
-        }
-        NodeFS.writeFileSync(
-          NodePath.posix.join(applicationsDir, linux.linuxDesktopEntryName),
-          renderUrlHandlerDesktopEntry({
-            displayName: resolveDesktopAppBranding({
-              isDevelopment: linux.isDevelopment,
-              appVersion: Electron.app.getVersion(),
-            }).displayName,
-            execTarget: process.env.APPIMAGE?.trim() || process.execPath,
-            scheme: ElectronProtocol.getDesktopScheme(linux.isDevelopment),
-            ...(iconPath === undefined ? {} : { iconPath }),
-          }),
-          "utf8",
-        );
-      } catch {}
+      if (process.env.T3CODE_FORK_ISOLATED !== "1")
+        try {
+          const applicationsDir = NodePath.posix.join(
+            process.env.XDG_DATA_HOME?.trim() ||
+              NodePath.posix.join(homeDirectory, ".local", "share"),
+            "applications",
+          );
+          NodeFS.mkdirSync(applicationsDir, { recursive: true });
+          const iconPath = Electron.app.isPackaged
+            ? NodePath.posix.join(
+                applicationsDir,
+                "..",
+                "icons",
+                `${linux.linuxDesktopEntryName}.png`,
+              )
+            : undefined;
+          if (iconPath !== undefined) {
+            try {
+              NodeFS.mkdirSync(NodePath.posix.dirname(iconPath), { recursive: true });
+              NodeFS.copyFileSync(
+                NodePath.posix.join(
+                  Electron.app.getAppPath(),
+                  "apps/desktop/prod-resources/icon.png",
+                ),
+                iconPath,
+              );
+            } catch {}
+          }
+          NodeFS.writeFileSync(
+            NodePath.posix.join(applicationsDir, linux.linuxDesktopEntryName),
+            renderUrlHandlerDesktopEntry({
+              displayName: resolveDesktopAppBranding({
+                isDevelopment: linux.isDevelopment,
+                appVersion: Electron.app.getVersion(),
+              }).displayName,
+              execTarget: process.env.APPIMAGE?.trim() || process.execPath,
+              scheme: ElectronProtocol.getDesktopScheme(linux.isDevelopment),
+              aliases: [ElectronProtocol.getDesktopSchemes(linux.isDevelopment)[1]],
+              ...(iconPath === undefined ? {} : { iconPath }),
+            }),
+            "utf8",
+          );
+        } catch {}
       // Chromium caches its portal registration during startup. Set the identity
       // before any asynchronous work can initialize it with Electron's default.
       Electron.app.setDesktopName(linux.linuxDesktopEntryName);

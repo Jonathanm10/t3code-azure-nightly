@@ -65,15 +65,21 @@ URL selects the deployment.
 Enable Clerk's Native API and add the desktop redirects to its SSO redirect allowlist:
 
 ```text
-t3code-azure-dev://app/
-t3code-azure://app/
+t3code-dev://app/
+t3code://app/
 ```
 
 Add the corresponding origin to the Clerk instance's Backend API `allowed_origins` array.
-Development uses `t3code-azure-dev://app`; production uses `t3code-azure://app`. Update the array with
+Development uses `t3code-dev://app`; production uses `t3code://app`. Update the array with
 `PATCH https://api.clerk.com/v1/instance` using the Clerk secret key, preserving existing entries.
 The Clerk Electron integration handles token
 persistence and system-browser callback delivery.
+
+Azure Nightly keeps these upstream account origins while retaining its separate
+bundle and profile. Its Azure protocol aliases handle existing app links, not
+Clerk account callbacks. A different renderer origin needs authorization from
+the owner of the Clerk instance; rebuilding with the same public key does not
+authorize it.
 
 ## Android native sign-in redirects
 

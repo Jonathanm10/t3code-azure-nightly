@@ -81,6 +81,7 @@ export function renderUrlHandlerDesktopEntry(input: {
   readonly displayName: string;
   readonly execTarget: string;
   readonly scheme: string;
+  readonly aliases?: readonly string[];
   readonly iconPath?: string;
 }): string {
   return [
@@ -92,7 +93,7 @@ export function renderUrlHandlerDesktopEntry(input: {
     "Terminal=false",
     "NoDisplay=true",
     "StartupNotify=false",
-    `MimeType=x-scheme-handler/${input.scheme};`,
+    `MimeType=${[input.scheme, ...(input.aliases ?? [])].map((scheme) => `x-scheme-handler/${scheme};`).join("")}`,
     "",
   ].join("\n");
 }
@@ -111,7 +112,7 @@ export const make = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const assets = yield* DesktopAssets.DesktopAssets;
 
-  const scheme = ElectronProtocol.getDesktopScheme(environment.isDevelopment);
+  const [scheme, alias] = ElectronProtocol.getDesktopSchemes(environment.isDevelopment);
   const desktopEntryPath = environment.path.join(
     environment.linuxApplicationsDir,
     environment.linuxDesktopEntryName,
@@ -127,6 +128,7 @@ export const make = Effect.gen(function* () {
       displayName: environment.displayName,
       execTarget,
       scheme,
+      aliases: [alias],
       ...(environment.isPackaged ? { iconPath } : {}),
     });
     // Pre-ready setup normally wrote this already. Avoid truncating a valid
@@ -184,7 +186,12 @@ export const make = Effect.gen(function* () {
     Effect.gen(function* () {
       const command = ChildProcess.make(
         "xdg-mime",
-        ["default", environment.linuxDesktopEntryName, `x-scheme-handler/${scheme}`],
+        [
+          "default",
+          environment.linuxDesktopEntryName,
+          `x-scheme-handler/${scheme}`,
+          `x-scheme-handler/${alias}`,
+        ],
         {
           stdin: "ignore",
           stdout: "ignore",
@@ -214,7 +221,7 @@ export const make = Effect.gen(function* () {
   );
 
   const register = Effect.gen(function* () {
-    if (environment.platform !== "linux") {
+    if (environment.platform !== "linux" || process.env.T3CODE_FORK_ISOLATED === "1") {
       return;
     }
     yield* writeDesktopEntry;

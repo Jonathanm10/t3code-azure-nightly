@@ -70,6 +70,18 @@ describe("DesktopPreReadyPlatform", () => {
     execFileSyncMock.mockReset();
   });
 
+  it.effect("keeps isolated profiles from replacing the OS URL-handler entry", () =>
+    Effect.gen(function* () {
+      yield* Effect.addFinalizer(() => Effect.sync(() => vi.unstubAllEnvs()));
+      vi.stubEnv("T3CODE_FORK_ISOLATED", "1");
+      getSwitchValueMock.mockReturnValue("");
+      yield* DesktopPreReadyPlatform.make;
+      assert.equal(writeFileSyncMock.mock.calls.length, 0);
+      assert.equal(copyFileSyncMock.mock.calls.length, 0);
+      assert.equal(setDesktopNameMock.mock.calls.length, 1);
+    }).pipe(Effect.provideService(HostProcess.Platform, "linux"), Effect.scoped),
+  );
+
   it.effect("preserves an explicit Linux password-store switch", () => {
     hasSwitchMock.mockImplementation((switchName) => switchName === "password-store");
     getSwitchValueMock.mockReturnValue(" basic ");
@@ -177,7 +189,10 @@ describe("DesktopPreReadyPlatform", () => {
         assert.equal(identity.desktopName, "com.jonathanm10.t3code.azure.desktop");
         assert.include(identity.desktopEntry ?? "", 'Exec="/Applications/current.AppImage" %U');
         assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Azure Nightly)");
-        assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code-azure;");
+        assert.include(
+          identity.desktopEntry ?? "",
+          "MimeType=x-scheme-handler/t3code;x-scheme-handler/t3code-azure;",
+        );
         assert.include(
           identity.desktopEntry ?? "",
           "Icon=/xdg/icons/com.jonathanm10.t3code.azure.desktop.png",
@@ -207,7 +222,7 @@ describe("DesktopPreReadyPlatform", () => {
     return Effect.gen(function* () {
       yield* DesktopPreReadyPlatform.make;
       const contents = writeFileSyncMock.mock.calls[0]?.[1];
-      assert.include(contents, "MimeType=x-scheme-handler/t3code-azure;");
+      assert.include(contents, "MimeType=x-scheme-handler/t3code;x-scheme-handler/t3code-azure;");
       assert.include(contents, "Icon=");
       assert.equal(setDesktopNameMock.mock.calls.length, 1);
     }).pipe(Effect.provideService(HostProcess.Platform, "linux"));

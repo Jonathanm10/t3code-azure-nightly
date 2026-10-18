@@ -17,7 +17,9 @@ const APP_DISPLAY_NAME = isDevelopment ? "T3 Code (Azure Dev)" : "T3 Code (Azure
 const APP_BUNDLE_ID = isDevelopment
   ? `com.jonathanm10.t3code.azure.dev.${devBundleIdSuffix || "local"}`
   : "com.jonathanm10.t3code.azure";
-const APP_PROTOCOL_SCHEMES = isDevelopment ? ["t3code-azure-dev"] : ["t3code-azure"];
+export const resolveAppProtocolSchemes = (development) =>
+  development ? ["t3code-dev", "t3code-azure-dev"] : ["t3code", "t3code-azure"];
+const APP_PROTOCOL_SCHEMES = resolveAppProtocolSchemes(isDevelopment);
 const LAUNCHER_VERSION = 20;
 const developmentMacIconPngPath = NodePath.join(
   repoRoot,

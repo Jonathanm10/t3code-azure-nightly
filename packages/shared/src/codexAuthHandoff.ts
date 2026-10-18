@@ -93,7 +93,9 @@ export function readCodexAuthHandoff(value: string, development: boolean) {
     const url = new URL(value);
     if (
       value.length > 32_768 ||
-      url.protocol !== (development ? "t3code-azure-dev:" : "t3code-azure:") ||
+      !(development ? ["t3code-dev:", "t3code-azure-dev:"] : ["t3code:", "t3code-azure:"]).includes(
+        url.protocol,
+      ) ||
       url.host !== "auth" ||
       url.pathname !== "/codex" ||
       url.username ||
@@ -110,7 +112,9 @@ export function readCodexAuthHandoff(value: string, development: boolean) {
     if (
       returnProtocol !== "http:" &&
       returnProtocol !== "https:" &&
-      returnProtocol !== url.protocol
+      !(development ? ["t3code-dev:", "t3code-azure-dev:"] : ["t3code:", "t3code-azure:"]).includes(
+        returnProtocol,
+      )
     )
       return undefined;
     return input;

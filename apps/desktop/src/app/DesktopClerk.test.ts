@@ -1,7 +1,12 @@
 // @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off - Hosted handoff test uses a real localhost listener without an OpenAI account.
+import * as NodeEvents from "node:events";
 import * as NodeHttp from "node:http";
 import * as NodePath from "@effect/platform-node/NodePath";
-import { codexAuthHandoffUrl, readCodexAuthDelivery } from "@t3tools/shared/codexAuthHandoff";
+import {
+  codexAuthDeliveryUrl,
+  codexAuthHandoffUrl,
+  readCodexAuthDelivery,
+} from "@t3tools/shared/codexAuthHandoff";
 import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, it } from "@effect/vitest";
@@ -65,6 +70,7 @@ const layerDesktopClerk = (
   } as unknown as DesktopEnvironment.DesktopEnvironment["Service"]);
 
   const electronApp = {
+    setAsDefaultProtocolClient: () => Effect.succeed(true),
     setPath: (name: string, value: string) =>
       Effect.sync(() => {
         events.push(`setPath:${name}:${value}`);
@@ -107,7 +113,7 @@ describe("DesktopClerk", () => {
           {
             storage: storageAdapter,
             passkeys: false,
-            renderer: { scheme: "t3code-azure-dev", host: "app" },
+            renderer: { scheme: "t3code-dev", host: "app" },
           },
         ],
       ]);
@@ -213,6 +219,7 @@ describe("DesktopClerk", () => {
     const quit = vi.fn();
     const registeredEvents: string[] = [];
     const electronApp = {
+      setAsDefaultProtocolClient: () => Effect.succeed(true),
       quit: Effect.sync(quit),
       on: (eventName: string) =>
         Effect.sync(() => {
@@ -227,7 +234,12 @@ describe("DesktopClerk", () => {
 
       assert.isTrue(Exit.isSuccess(exit));
       assert.equal(quit.mock.calls.length, 0);
-      assert.deepEqual(registeredEvents, ["open-url", "open-file", "second-instance"]);
+      assert.deepEqual(registeredEvents, [
+        "browser-window-created",
+        "open-url",
+        "open-file",
+        "second-instance",
+      ]);
     }).pipe(
       Effect.provide(layerDesktopClerk()),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
@@ -242,6 +254,7 @@ describe("DesktopClerk", () => {
     const quit = vi.fn();
     const registeredEvents: string[] = [];
     const electronApp = {
+      setAsDefaultProtocolClient: () => Effect.succeed(true),
       quit: Effect.sync(quit),
       on: (eventName: string) =>
         Effect.sync(() => {
@@ -274,8 +287,9 @@ it.effect(
     const listeners = new Map<string, (...args: unknown[]) => void>();
     const revealed = Promise.withResolvers<void>();
     const loadURL = vi.fn(async (_url: string) => undefined);
-    const window = { loadURL };
+    const window = { loadURL, webContents: { getURL: () => "t3code-dev://app/" } };
     const electronApp = {
+      setAsDefaultProtocolClient: () => Effect.succeed(true),
       on: (name: string, listener: (...args: unknown[]) => void) =>
         Effect.sync(() => {
           listeners.set(name, listener);
@@ -299,7 +313,7 @@ it.effect(
       ]);
       yield* Effect.promise(() => revealed.promise);
       assert.deepEqual(loadURL.mock.calls, [
-        ["t3code-azure-dev://app/settings/providers?instanceId=work"],
+        ["t3code-dev://app/settings/providers?instanceId=work"],
       ]);
       listeners.get("open-url")!(event, "t3code-azure-dev://app/welcome#agents:machine-id");
       assert.equal(event.preventDefault.mock.calls.length, 1);
@@ -365,6 +379,7 @@ it.effect.each(["startup", "open-url"] as const)(
       const listeners = new Map<string, (...args: unknown[]) => void>();
       const electronApp = {
         whenReady: Effect.void,
+        setAsDefaultProtocolClient: () => Effect.succeed(true),
         on: (name: string, listener: (...args: unknown[]) => void) =>
           Effect.sync(() => {
             listeners.set(name, listener);
@@ -403,6 +418,7 @@ it.effect("hands web and app links to the renderer and leaves other links alone"
     const listeners = new Map<string, (...args: unknown[]) => void>();
     const electronApp = {
       whenReady: Effect.void,
+      setAsDefaultProtocolClient: () => Effect.succeed(true),
       on: (name: string, listener: (...args: unknown[]) => void) =>
         Effect.sync(() => {
           listeners.set(name, listener);
@@ -427,8 +443,8 @@ it.effect("hands web and app links to the renderer and leaves other links alone"
       assert.deepStrictEqual(received, [
         "https://example.com/page",
         "http://localhost:3000/",
-        "t3code-azure-dev://new?prompt=hi",
-        "t3code-azure-dev://threads/env-1/thread-1",
+        "t3code-dev://new?prompt=hi",
+        "t3code-dev://threads/env-1/thread-1",
       ]);
     }).pipe(
       Effect.provide(layerDesktopClerk(true, [], "darwin")),
@@ -448,3 +464,115 @@ it.effect("hands web and app links to the renderer and leaves other links alone"
     );
   }).pipe(Effect.scoped),
 );
+
+describe("canonical desktop provider returns", () => {
+  it.each([
+    { development: false, canonical: "t3code", legacy: "t3code-azure" },
+    { development: true, canonical: "t3code-dev", legacy: "t3code-azure-dev" },
+  ])(
+    "preserves validated Codex delivery for $canonical and its legacy alias",
+    ({ development, canonical, legacy }) => {
+      const authorizationUrl = new URL("https://auth.openai.com/api/accounts/authorize");
+      authorizationUrl.search = new URLSearchParams({
+        client_id: "dynamic_agent_client",
+        response_type: "code",
+        redirect_uri: "http://127.0.0.1:54213/auth/callback",
+        state: "a".repeat(43),
+        code_challenge_method: "S256",
+        code_challenge: "b".repeat(43),
+      }).toString();
+      for (const scheme of [canonical, legacy]) {
+        const delivery = codexAuthDeliveryUrl(
+          {
+            authorizationUrl: authorizationUrl.toString(),
+            returnUrl: `${scheme}://app/welcome#agents:remote`,
+            environmentId: EnvironmentId.make("remote"),
+            instanceId: ProviderInstanceId.make("codex"),
+            flowId: "flow-one",
+          },
+          `http://127.0.0.1:54213/auth/callback?state=${"a".repeat(43)}&code=synthetic`,
+        );
+        const normalized = DesktopClerk.desktopProviderAuthReturnUrl(delivery, development);
+        assert.isDefined(normalized);
+        assert.equal(new URL(normalized!).protocol, `${canonical}:`);
+        assert.equal(new URL(normalized!).hash, new URL(delivery).hash);
+        assert.equal(
+          readCodexAuthDelivery(normalized!)?.returnUrl,
+          `${canonical}://app/welcome#agents:remote`,
+        );
+        assert.equal(
+          DesktopClerk.desktopProviderAuthReturnUrl(
+            `${scheme}://app/settings/providers?instanceId=work&code=discard`,
+            development,
+          ),
+          `${canonical}://app/settings/providers?instanceId=work`,
+        );
+        for (const invalid of [
+          `${scheme}://other/settings`,
+          `${scheme}://user@app/settings`,
+          `${scheme}://app:123/settings`,
+          `${scheme}://app/auth/callback?code=clerk`,
+          `${scheme}://app/settings#codex-auth=broken`,
+          `${scheme}://app.evil/settings`,
+          `${scheme}://app/new`,
+        ])
+          assert.isUndefined(DesktopClerk.desktopProviderAuthReturnUrl(invalid, development));
+        assert.isUndefined(DesktopClerk.desktopProviderAuthReturnUrl(delivery, !development));
+      }
+    },
+  );
+});
+
+it.effect("queues a cold provider return until the canonical frontend is ready", () => {
+  storageMock.mockReturnValue(storageAdapter);
+  createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
+  const listeners = new Map<string, (...args: unknown[]) => void>();
+  const contents = Object.assign(new NodeEvents.EventEmitter(), {
+    getURL: () => currentUrl,
+    isDestroyed: () => false,
+  });
+  let currentUrl = "t3code-dev://app/__t3_azure_origin_migration_v1";
+  const revealed = Promise.withResolvers<void>();
+  const reveal = vi.fn(() => revealed.resolve());
+  const loadURL = vi.fn(async (_url: string) => undefined);
+  const window = { loadURL, webContents: contents };
+  const electronApp = {
+    setAsDefaultProtocolClient: () => Effect.succeed(true),
+    on: (name: string, listener: (...args: unknown[]) => void) =>
+      Effect.sync(() => {
+        listeners.set(name, listener);
+      }),
+  } as unknown as ElectronApp.ElectronApp["Service"];
+  const electronWindow = {
+    currentMainOrFirst: Effect.succeedSome(window),
+    reveal: () => Effect.sync(reveal),
+  } as unknown as ElectronWindow.ElectronWindow["Service"];
+  return Effect.gen(function* () {
+    const clerk = yield* DesktopClerk.DesktopClerk;
+    yield* clerk.configure;
+    listeners.get("browser-window-created")!({}, window);
+    contents.emit("did-finish-load");
+    listeners.get("second-instance")!({}, ["t3"]);
+    yield* Effect.yieldNow;
+    assert.equal(loadURL.mock.calls.length, 0);
+    assert.equal(reveal.mock.calls.length, 0);
+    currentUrl = "t3code-dev://app/";
+    contents.emit("did-finish-load");
+    yield* Effect.promise(() => revealed.promise);
+    assert.deepEqual(loadURL.mock.calls, [["t3code-dev://app/settings/providers?instanceId=work"]]);
+    contents.emit("did-finish-load");
+    yield* Effect.yieldNow;
+    assert.equal(loadURL.mock.calls.length, 1);
+  }).pipe(
+    Effect.provide(layerDesktopClerk()),
+    Effect.provideService(HostProcess.Arguments, [
+      "t3",
+      "t3code-azure-dev://app/settings/providers?instanceId=work",
+    ]),
+    Effect.provideService(ElectronApp.ElectronApp, electronApp),
+    Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+    Effect.provideService(DesktopWebLinks.DesktopWebLinks, ignoreWebLinks),
+    Effect.scoped,
+    Effect.tap(() => Effect.sync(() => assert.equal(contents.listenerCount("did-finish-load"), 0))),
+  );
+});

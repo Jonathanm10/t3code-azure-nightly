@@ -14,6 +14,10 @@ import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
 import { installDesktopIpcHandlers } from "../ipc/DesktopIpcHandlers.ts";
 import * as DesktopAppActivation from "./DesktopAppActivation.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
+import {
+  DesktopOriginMigrationError,
+  migrateDesktopOriginStorage,
+} from "./DesktopOriginMigration.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
@@ -300,13 +304,17 @@ const startup = Effect.gen(function* () {
   }
 
   yield* appIdentity.configure;
-  yield* lifecycle.register;
   yield* clerk.configure;
 
   yield* electronApp.whenReady.pipe(
     Effect.withSpan("desktop.electron.whenReady"),
     Effect.catchCause((cause) => fatalStartupCause("whenReady", cause)),
   );
+  yield* Effect.tryPromise({
+    try: (signal) => migrateDesktopOriginStorage(environment.isDevelopment, signal),
+    catch: () => new DesktopOriginMigrationError(),
+  }).pipe(Effect.catchCause((cause) => fatalStartupCause("origin storage migration", cause)));
+  yield* lifecycle.register;
   yield* logStartupInfo("app ready");
   if (environment.platform === "linux") {
     const selectedBackend = yield* safeStorage.selectedStorageBackend;

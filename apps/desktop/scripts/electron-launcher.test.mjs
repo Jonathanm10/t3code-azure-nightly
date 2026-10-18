@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 import { assert, describe, it } from "vite-plus/test";
 
 import {
+  resolveAppProtocolSchemes,
   makeDevelopmentEnvironmentScript,
   makeDevelopmentLauncherScript,
   resolveElectronBinaryPath,
@@ -16,6 +17,10 @@ import {
 } from "./electron-launcher.mjs";
 
 describe("electron development launcher", () => {
+  it("declares supported account callbacks and legacy Azure links for each flavor", () => {
+    assert.deepEqual(resolveAppProtocolSchemes(false), ["t3code", "t3code-azure"]);
+    assert.deepEqual(resolveAppProtocolSchemes(true), ["t3code-dev", "t3code-azure-dev"]);
+  });
   it("uses captured values only as fallbacks for a live runner environment", () => {
     const environmentScript = makeDevelopmentEnvironmentScript({
       VITE_DEV_SERVER_URL: "http://127.0.0.1:8526",

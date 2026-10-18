@@ -1,4 +1,5 @@
 import { createClerkBridge } from "@clerk/electron";
+import type * as Electron from "electron";
 import * as NodeURL from "node:url";
 import { storage } from "@clerk/electron/storage";
 import * as Context from "effect/Context";
@@ -8,7 +9,11 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
-import { codexAuthDeliveryUrl, readCodexAuthHandoff } from "@t3tools/shared/codexAuthHandoff";
+import {
+  codexAuthDeliveryUrl,
+  readCodexAuthDelivery,
+  readCodexAuthHandoff,
+} from "@t3tools/shared/codexAuthHandoff";
 import { receiveCodexAuthCallback, CodexAuthCallbackError } from "./CodexAuthCallback.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import { providerAuthReturnUrl } from "@t3tools/shared/providerAuthReturnUrl";
@@ -18,6 +23,7 @@ import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/rela
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import { ORIGIN_MIGRATION_PATH } from "./DesktopOriginMigration.ts";
 import * as DesktopUserData from "./DesktopUserData.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopWebLinks from "./DesktopWebLinks.ts";
@@ -82,6 +88,24 @@ export const desktopClerkFrontendApiHostname = resolveDesktopClerkFrontendApiHos
     ? undefined
     : __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__,
 );
+
+export function desktopProviderAuthReturnUrl(value: string | undefined, isDevelopment: boolean) {
+  const destination = providerAuthReturnUrl(value);
+  if (!destination) return undefined;
+  const url = new URL(destination);
+  if (
+    !ElectronProtocol.getDesktopSchemes(isDevelopment).some(
+      (scheme) => url.protocol === `${scheme}:`,
+    )
+  )
+    return undefined;
+  if (value && new URL(value).hash.startsWith("#codex-auth=")) {
+    if (!readCodexAuthDelivery(value)) return undefined;
+    url.hash = new URL(value).hash;
+  }
+  url.protocol = `${ElectronProtocol.getDesktopScheme(isDevelopment)}:`;
+  return url.toString();
+}
 
 function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean) {
   return createClerkBridge({
@@ -170,38 +194,77 @@ export const make = Effect.gen(function* () {
         );
         return true;
       };
-      const resumeProviderAuth = (value: string | undefined) => {
-        const destination = providerAuthReturnUrl(value);
-        const expectedOrigin = `${ElectronProtocol.getDesktopScheme(environment.isDevelopment)}://app`;
-        if (!destination?.startsWith(`${expectedOrigin}/`)) return false;
-        void runPromise(
-          Effect.gen(function* () {
-            const mainWindow = yield* electronWindow.currentMainOrFirst;
-            if (Option.isNone(mainWindow)) return;
-            yield* Effect.promise(() => mainWindow.value.loadURL(destination));
-            yield* electronWindow.reveal(mainWindow.value);
-          }).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Could not return to provider setup", cause),
-            ),
-          ),
+      const isApplicationWindow = (window: Electron.BrowserWindow) => {
+        const url = new URL(window.webContents.getURL() || "about:blank");
+        return (
+          url.protocol === `${ElectronProtocol.getDesktopScheme(environment.isDevelopment)}:` &&
+          url.host === ElectronProtocol.DESKTOP_HOST &&
+          url.pathname !== ORIGIN_MIGRATION_PATH
         );
+      };
+      let pendingProviderReturn: string | undefined;
+      const deliverProviderReturn = Effect.gen(function* () {
+        if (!pendingProviderReturn) return;
+        const mainWindow = yield* electronWindow.currentMainOrFirst;
+        if (Option.isNone(mainWindow) || !isApplicationWindow(mainWindow.value)) return;
+        const destination = pendingProviderReturn;
+        pendingProviderReturn = undefined;
+        yield* Effect.promise(() => mainWindow.value.loadURL(destination));
+        yield* electronWindow.reveal(mainWindow.value);
+      }).pipe(Effect.catchCause(() => Effect.logWarning("Could not return to provider setup.")));
+      const resumeProviderAuth = (value: string | undefined) => {
+        const destination = desktopProviderAuthReturnUrl(value, environment.isDevelopment);
+        if (!destination) return false;
+        pendingProviderReturn = destination;
+        void runPromise(deliverProviderReturn);
         return true;
       };
+      const detachPendingWindows = new Set<() => void>();
+      yield* electronApp.on(
+        "browser-window-created",
+        (_event: unknown, window: Electron.BrowserWindow) => {
+          const contents = window.webContents;
+          const finished = () => {
+            void runPromise(deliverProviderReturn);
+          };
+          const detach = () => {
+            contents.removeListener("did-finish-load", finished);
+            contents.removeListener("destroyed", detach);
+            detachPendingWindows.delete(detach);
+          };
+          contents.on("did-finish-load", finished);
+          contents.once("destroyed", detach);
+          detachPendingWindows.add(detach);
+        },
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          for (const detach of detachPendingWindows) detach();
+        }),
+      );
       const openAppLink = (value: string | undefined) => {
         if (
           !value ||
           !URL.canParse(value) ||
-          new URL(value).protocol !==
-            `${ElectronProtocol.getDesktopScheme(environment.isDevelopment)}:` ||
+          !ElectronProtocol.getDesktopSchemes(environment.isDevelopment).some(
+            (scheme) => new URL(value).protocol === `${scheme}:`,
+          ) ||
           promptLinkAppPath(value) === null
         )
           return false;
-        void runPromise(webLinks.receive(value));
+        const canonical = new URL(value);
+        canonical.protocol = `${ElectronProtocol.getDesktopScheme(environment.isDevelopment)}:`;
+        void runPromise(webLinks.receive(canonical.toString()));
         return true;
       };
+      yield* electronApp.setAsDefaultProtocolClient(
+        ElectronProtocol.getDesktopSchemes(environment.isDevelopment)[1],
+      );
       const args = yield* HostProcess.Arguments;
-      args.some((value) => startProviderAuthHandoff(value) || openAppLink(value));
+      args.some(
+        (value) =>
+          startProviderAuthHandoff(value) || resumeProviderAuth(value) || openAppLink(value),
+      );
       const openWebLink = (url: string) => {
         if (!DesktopWebLinks.isWebLink(url)) return false;
         void runPromise(webLinks.receive(url));
@@ -232,7 +295,8 @@ export const make = Effect.gen(function* () {
         void runPromise(
           Effect.gen(function* () {
             const mainWindow = yield* electronWindow.currentMainOrFirst;
-            if (Option.isSome(mainWindow)) yield* electronWindow.reveal(mainWindow.value);
+            if (Option.isSome(mainWindow) && isApplicationWindow(mainWindow.value))
+              yield* electronWindow.reveal(mainWindow.value);
           }),
         );
       });

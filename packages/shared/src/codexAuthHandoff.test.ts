@@ -47,14 +47,14 @@ describe("Codex desktop handoff", () => {
   it("rejects other handlers, schemes, arbitrary return sites, and non-OpenAI authorization", () => {
     const link = codexAuthHandoffUrl(input);
     expect(new URL(link).protocol).toBe("t3code-azure:");
-    expect(readCodexAuthHandoff(link.replace("t3code-azure:", "t3code:"), false)).toBeUndefined();
+    expect(readCodexAuthHandoff(link.replace("t3code-azure:", "t3code:"), false)).toEqual(input);
     expect(readCodexAuthHandoff(link.replace("//auth/", "//other/"), false)).toBeUndefined();
     expect(
       readCodexAuthHandoff(
         codexAuthHandoffUrl({ ...input, returnUrl: "t3code://app/welcome" }),
         false,
-      ),
-    ).toBeUndefined();
+      )?.returnUrl,
+    ).toBe("t3code://app/welcome");
     expect(
       readCodexAuthHandoff(
         codexAuthHandoffUrl({ ...input, returnUrl: "t3code-azure-dev://app/welcome" }),

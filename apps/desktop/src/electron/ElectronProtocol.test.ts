@@ -24,6 +24,12 @@ import * as ElectronProtocol from "./ElectronProtocol.ts";
 const layerProtocol = ElectronProtocol.layer.pipe(Layer.provide(NodeServices.layer));
 
 describe("ElectronProtocol", () => {
+  it("uses supported renderer origins and keeps Azure schemes as external aliases", () => {
+    assert.equal(ElectronProtocol.getDesktopUrl(false), "t3code://app/");
+    assert.equal(ElectronProtocol.getDesktopUrl(true), "t3code-dev://app/");
+    assert.deepEqual(ElectronProtocol.getDesktopSchemes(false), ["t3code", "t3code-azure"]);
+    assert.deepEqual(ElectronProtocol.getDesktopSchemes(true), ["t3code-dev", "t3code-azure-dev"]);
+  });
   beforeEach(() => {
     handleMock.mockReset();
     netFetchMock.mockReset();

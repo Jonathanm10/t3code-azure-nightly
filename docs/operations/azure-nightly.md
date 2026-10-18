@@ -1,7 +1,8 @@
 # Azure Nightly fork releases
 
 The fork uses `com.jonathanm10.t3code.azure`, `T3 Code (Azure Nightly)` and the
-`t3code-azure` protocol. The existing update controls consume the public
+upstream `t3code` renderer and account callback protocol. It also handles existing
+`t3code-azure` links. The existing update controls consume the public
 `Jonathanm10/t3code-azure-nightly` Nightly feed. Core and MCP tarballs accompany
 the desktop release; neither needs a private registry.
 
@@ -123,13 +124,20 @@ verification, the same profile and synthetic encrypted/preview/backend sentinels
 and a packaged native Azure read. A profile fixture or successful typecheck is
 not updater, Keychain, Apple account or runtime isolation proof.
 
-The desktop uses its own external and renderer scheme. Shared/server CORS and provider-return validators admit the exact fork origins,
-and generated hosted Codex handoffs and prompt links target the fork. The desktop
-consumes only its own scheme. It does not claim official-app callbacks.
-The installed Clerk SDK derives its redirect URL and handler from the configured
-renderer scheme. Its source accepts the fork scheme, but the compiled public
-Clerk instance must allow that redirect. A real Connect/OAuth sign-in is still
-required to establish service authorization; source inspection does not prove it.
+The renderer and Clerk account callbacks use `t3code://app` in production and
+`t3code-dev://app` in development, which the T3 account service accepts. Azure
+registers these account protocols while it is the active desktop app. Launching
+the official app can reclaim them. Existing `t3code-azure` and `t3code-azure-dev`
+links remain aliases for provider returns and prompt links; the loaded renderer
+always uses its canonical origin.
+
+Before the first frontend loads, the app copies missing application localStorage
+values from the old Azure origin within the same isolated Electron profile.
+Existing destination values win, the source stays intact, and completion follows
+readback. Backend history and native credential stores keep their existing paths.
+Renderer DPoP keys are regenerated when the account connects. Verify real account
+sign-in, callback delivery, Connect controls and remote discovery in the signed
+package before claiming the connection works.
 
 Electron's [pinned startup source](https://raw.githubusercontent.com/electron/electron/v44.4.5/shell/browser/electron_browser_main_parts.cc)
 loads and joins app code in `PostEarlyInitialization`, then sets macOS Keychain
