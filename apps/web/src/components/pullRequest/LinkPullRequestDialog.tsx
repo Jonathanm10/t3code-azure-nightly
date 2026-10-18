@@ -1,20 +1,16 @@
-import { pullRequestHostOf, type ScopedThreadRef } from "@t3tools/contracts";
-import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
-import type { AzureDevOpsServerProfile } from "@t3tools/contracts";
+import type { ScopedThreadRef } from "@t3tools/contracts";
+import { azureDevOpsServerProfiles } from "@t3tools/shared/azureDevOps";
 import {
-  azureDevOpsServerProfiles,
-  resolveAzureDevOpsServerAddress,
-  azureDevOpsServerPullRequestUrl,
-} from "@t3tools/shared/azureDevOps";
-import { useEnvironmentSettings } from "~/hooks/useSettings";
+  pullRequestLinkProject,
+  resolveLinkPullRequestInput,
+} from "@t3tools/client-runtime/pull-request-link-input";
 import { useAtomValue } from "@effect/atom-react";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { useEffect, useRef, useState } from "react";
 
-import { parseChangeRequestUrl } from "~/lib/openPullRequestLink";
-import { parsePullRequestReference } from "~/pullRequestReference";
 import { useProjects, useThreadShell } from "~/state/entities";
 import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
+import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { Atom } from "effect/reactivity";
 import { Button } from "../ui/button";
@@ -67,84 +63,6 @@ export function LinkPullRequestDialogHost() {
   );
 }
 
-interface ResolvedLink {
-  readonly host: string;
-  readonly repository: string;
-  readonly number: number;
-  readonly url: string;
-}
-
-export function resolveLinkPullRequestInput(input: {
-  readonly profiles?: ReadonlyArray<AzureDevOpsServerProfile>;
-  readonly reference: string;
-  readonly project: {
-    readonly host: string;
-    readonly repository: string;
-    readonly webUrl: (number: number) => string | null;
-  } | null;
-  readonly hasProject: (reference: ResolvedLink) => boolean;
-}): { link: ResolvedLink } | { error: string } | null {
-  const parsed =
-    parseChangeRequestUrl(input.reference.trim(), input.profiles) !== null
-      ? input.reference.trim()
-      : parsePullRequestReference(input.reference);
-  if (parsed === null) return null;
-  const url = parseChangeRequestUrl(parsed, input.profiles);
-  if (url !== null) {
-    if (!input.hasProject({ ...url, url: parsed })) {
-      return { error: `No project in this environment can read ${url.host}/${url.repository}.` };
-    }
-    return {
-      link: { host: url.host, repository: url.repository, number: url.number, url: parsed },
-    };
-  }
-  const number = Number(parsed);
-  if (!Number.isSafeInteger(number) || number < 1) return null;
-  if (input.project === null) {
-    return { error: "Paste a full URL to link a pull request from another repository." };
-  }
-  const webUrl = input.project.webUrl(number);
-  const webReference = webUrl === null ? null : parseChangeRequestUrl(webUrl, input.profiles);
-  if (webUrl === null || webReference === null) {
-    return { error: "Paste a full URL; this project's host has no known pull request URL." };
-  }
-  return {
-    link: { ...webReference, url: webUrl },
-  };
-}
-
-function resolveOwnProject(
-  environmentProjects: ReturnType<typeof useProjects>,
-  projectId: LinkPullRequestDialogProps["projectId"],
-  profiles: ReadonlyArray<AzureDevOpsServerProfile>,
-) {
-  const project = environmentProjects.find((candidate) => candidate.id === projectId);
-  const identity = project?.repositoryIdentity;
-  if (!project || !identity) return null;
-  const server = resolveAzureDevOpsServerAddress(identity.locator.remoteUrl, profiles);
-  const repository =
-    server?.canonicalKey.slice(server.host.length + 1) ??
-    identity.displayName ??
-    (identity.owner && identity.name ? `${identity.owner}/${identity.name}` : null);
-  if (repository === null) return null;
-  const definition = sourceControlClients.get(identity.provider ?? "unknown");
-  const host = server?.host ?? pullRequestHostOf(identity, definition.kind);
-  return {
-    host,
-    repository,
-    webUrl: (number: number) =>
-      server !== null
-        ? azureDevOpsServerPullRequestUrl(server, number)
-        : definition.changeRequestUrl({
-            host,
-            repository,
-            number,
-            remoteUrl: identity.locator.remoteUrl,
-            webUrl: identity.webUrl,
-          }),
-  };
-}
-
 function LinkPullRequestDialog({
   open,
   threadRef,
@@ -157,9 +75,10 @@ function LinkPullRequestDialog({
   const [submitError, setSubmitError] = useState<string | null>(null);
   const projects = useProjects();
   const profiles = useEnvironmentSettings(threadRef.environmentId, azureDevOpsServerProfiles);
-  const ownProject = resolveOwnProject(
-    projects.filter((project) => project.environmentId === threadRef.environmentId),
-    projectId,
+  const ownProject = pullRequestLinkProject(
+    projects.find(
+      (project) => project.environmentId === threadRef.environmentId && project.id === projectId,
+    )?.repositoryIdentity,
     profiles,
   );
   const linking = usePullRequestLinking(threadRef.environmentId);
