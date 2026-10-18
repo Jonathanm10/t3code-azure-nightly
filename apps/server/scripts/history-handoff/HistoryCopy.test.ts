@@ -25,6 +25,7 @@ import * as EventSink from "../../src/orchestration-v2/EventSink.ts";
 import { historyLayer } from "./HistoryFreeze.ts";
 import { now } from "./HistoryFreeze.fixture.ts";
 import { copyHistory } from "./HistoryCopy.ts";
+import { assertDestinationHistorySchema } from "./HistoryCapturePolicy.ts";
 import { HistoryCaptureRefused, openCaptureJournal, tableDigest } from "./HistoryCapture.ts";
 import { resolveMediaSource } from "../../../../packages/client-runtime/src/mediaSource.ts";
 import {
@@ -264,11 +265,16 @@ it("distinguishes real Markdown destinations, code literals, escaped links, file
   });
 });
 
-it.effect(
-  "copies all admitted history, excludes every operational sentinel, publishes and rejects installed divergence",
-  () =>
+it.effect.each([
+  { authLayout: "legacy", lastMigration: 62 },
+  { authLayout: "legacy", lastMigration: 63 },
+  { authLayout: "current", lastMigration: 62 },
+  { authLayout: "current", lastMigration: 63 },
+] as const)(
+  "copies $authLayout history at migration $lastMigration, excludes operational state and rejects installed divergence",
+  (sourceProfile) =>
     Effect.gen(function* () {
-      const f = yield* fixture();
+      const f = yield* fixture(sourceProfile);
       const before = tableDigest(f.database, "orchestration_events");
       const sourceHash = (path: string) =>
         NodeFSP.readFile(path).then((bytes) =>
@@ -307,23 +313,39 @@ it.effect(
         expect(
           f.database.prepare("SELECT name FROM effect_sql_migrations WHERE migration_id=41").get()
             ?.name,
-        ).toBe("ProjectionTurnsReasoning");
+        ).toBe(
+          sourceProfile.authLayout === "legacy"
+            ? "ProjectionTurnsReasoning"
+            : "AuthSessionClientConnection",
+        );
         expect(
           target.prepare("SELECT name FROM effect_sql_migrations WHERE migration_id=41").get()
             ?.name,
         ).toBe("AuthSessionClientConnection");
+        expect(
+          f.database.prepare("SELECT MAX(migration_id) AS id FROM effect_sql_migrations").get()?.id,
+        ).toBe(sourceProfile.lastMigration);
+        expect(
+          target.prepare("SELECT MAX(migration_id) AS id FROM effect_sql_migrations").get()?.id,
+        ).toBe(63);
+        expect(assertDestinationHistorySchema(target)).toBe(result.receipt.cut.policyDigest);
         expect(result.receipt.cut.agentSequence).toBeLessThan(9999);
         expect(tableDigest(target, "orchestration_v2_events")).toEqual(
           tableDigest(f.database, "orchestration_v2_events"),
         );
-        expect(tableDigest(target, "checkpoint_diff_blobs")).toEqual(
-          tableDigest(f.database, "checkpoint_diff_blobs"),
+        for (const name of [
+          "checkpoint_diff_blobs",
+          "projection_turns",
+          "projection_thread_activities",
+          "projection_thread_proposed_plans",
+        ]) {
+          expect(tableDigest(target, name)).toEqual(tableDigest(f.database, name));
+        }
+        expect(target.prepare("SELECT count(*) AS count FROM projection_state").get()?.count).toBe(
+          0,
         );
         expect(tableDigest(target, "mcp_app_model_context")).toEqual(
           tableDigest(f.database, "mcp_app_model_context"),
-        );
-        expect(tableDigest(target, "projection_turns")).toEqual(
-          tableDigest(f.database, "projection_turns"),
         );
         expect(
           target

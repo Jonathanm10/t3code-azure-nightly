@@ -835,12 +835,21 @@ const currentAuthDefinition = "1b6d96b81eab641fc176e3091928d3225055ea93b665f5024
 const currentAuthColumns = "f9ef9c3d9fe88a5feaa433b7ecb3cf290a463cba4593a3dc6b3235194526166a";
 const expectedUniqueIndexes = "2e230c1606839be52b710c87f65c453531464b3fba022dcc4efbe6c1c716b549";
 
-const legacySourceMigrationHash =
-  "69339dc0950879116602628e65c953accdc8a958a1e9c2af249bbe3d2b298bf4";
-const expectedMigrationHash = "74a03d352f96bad31b09f3142f18018f94271aa9f65d3f77f2f827e1ab3a590e";
+const expectedBuildMigrationHash =
+  "96a20fec0f0e5cb0a7665c49590cc497ffb040ba65e3cd0505072921d6499273";
+const acceptedSourceMigrationHashes = {
+  legacyAuth: [
+    "69339dc0950879116602628e65c953accdc8a958a1e9c2af249bbe3d2b298bf4",
+    "35b742ef99cc802eb095f4ff84963bf015a6e19de1d22d8bc6bd423b4238fabd",
+  ],
+  currentAuth: [
+    "74a03d352f96bad31b09f3142f18018f94271aa9f65d3f77f2f827e1ab3a590e",
+    expectedBuildMigrationHash,
+  ],
+} as const;
 
 function assertSchema(database: NodeSqlite.DatabaseSync, target: "source" | "destination") {
-  if (hash(JSON.stringify(migrationManifest)) !== expectedMigrationHash) {
+  if (hash(JSON.stringify(migrationManifest)) !== expectedBuildMigrationHash) {
     throw new HistorySchemaRefused({ reason: "changed-build-migrations" });
   }
   const tables = Schema.decodeUnknownSync(tableSchema)(
@@ -886,10 +895,12 @@ function assertSchema(database: NodeSqlite.DatabaseSync, target: "source" | "des
       .prepare("SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id")
       .all(),
   );
-  if (
-    hash(JSON.stringify(migrations.map((m) => [m.migration_id, m.name]))) !==
-    (target === "source" && !currentAuthLayout ? legacySourceMigrationHash : expectedMigrationHash)
-  ) {
+  const migrationHash = hash(JSON.stringify(migrations.map((m) => [m.migration_id, m.name])));
+  const acceptedMigrationHashes =
+    target === "destination"
+      ? [expectedBuildMigrationHash]
+      : acceptedSourceMigrationHashes[currentAuthLayout ? "currentAuth" : "legacyAuth"];
+  if (!acceptedMigrationHashes.some((accepted) => accepted === migrationHash)) {
     throw new HistorySchemaRefused({ reason: "migration-ledger-mismatch" });
   }
   const indexes = Schema.decodeUnknownSync(tableSchema)(
@@ -919,8 +930,8 @@ function assertSchema(database: NodeSqlite.DatabaseSync, target: "source" | "des
       tables: historyTables,
       currentAuthDefinition,
       currentAuthColumns,
-      expectedMigrationHash,
-      legacySourceMigrationHash,
+      expectedBuildMigrationHash,
+      acceptedSourceMigrationHashes,
       expectedUniqueIndexes,
       userVersion: 0,
     }),

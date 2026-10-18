@@ -8104,6 +8104,12 @@ it.effect(
         getChangeRequestWatchFingerprint: () =>
           Effect.succeed({ status: "private-status", remarks: "private-remarks" }),
         getReviewThreadComments: () => Effect.succeed({ comments: [], nextCursor: null }),
+        getDiff: () =>
+          Effect.succeed({
+            patch: "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n",
+            truncated: false,
+            nextCursor: null,
+          }),
         getDiffFileContents: () =>
           Effect.succeed({ oldContents: "private before", newContents: "private after" }),
         getFileRevisions: () => Effect.succeed({ revisions: new Map([["src/a.ts", "revision"]]) }),
@@ -8153,6 +8159,80 @@ it.effect(
     }),
 );
 
+it.effect("scopes Server expanded-file validation and contents to the current credential", () =>
+  Effect.gen(function* () {
+    let account = "account-one";
+    let acquisitions = 0;
+    const reads: string[] = [];
+    const pinned = Context.Reference<string | null>("test/expandedServerAccount", {
+      defaultValue: () => null,
+    });
+    const service = yield* makeService({
+      azureProfiles: [{ apiCollectionUrl: "https://git.example.test/C" }],
+      projects: [
+        project({
+          id: "server",
+          title: "Server",
+          workspaceRoot: "/server",
+          provider: SourceControlProviderKind.make("unknown"),
+          host: "git.example.test",
+          repository: "C/P/_git/Repo",
+          remoteUrl: "https://git.example.test/C/P/_git/Repo",
+        }),
+      ],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("azure-devops-server"), {
+          repositoryKey: ({ canonicalKey }) => canonicalKey,
+          withVerifiedCredential: (_input, use) =>
+            Effect.suspend(() => {
+              acquisitions++;
+              return use({
+                viewer: account,
+                accountId: account,
+                credentialFingerprint: account,
+              }).pipe(Effect.provideService(pinned, account));
+            }),
+          getDiff: () =>
+            Effect.map(pinned, (viewer) => {
+              assert.strictEqual(viewer, account);
+              const path = viewer === "account-one" ? "a.ts" : "b.ts";
+              return {
+                patch: `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n`,
+                truncated: false,
+                nextCursor: null,
+              };
+            }),
+          getDiffFileContents: (input) =>
+            Effect.map(pinned, (viewer) => {
+              assert.strictEqual(viewer, account);
+              reads.push(`${viewer}:${input.newPath}`);
+              return { oldContents: "before", newContents: viewer ?? "unexpected" };
+            }),
+        }),
+      ],
+    });
+    const expand = (path: string) =>
+      service.diffFileContents({
+        projectId: ProjectId.make("server"),
+        repository: "Repo",
+        number: 42,
+        changeType: "change",
+        oldPath: path,
+        newPath: path,
+      });
+
+    assert.strictEqual((yield* expand("a.ts")).newContents, "account-one");
+    account = "account-two";
+    const denied = yield* expand("a.ts").pipe(Effect.flip);
+    assert.strictEqual(denied._tag, "PullRequestOperationError");
+    assert.strictEqual((yield* expand("b.ts")).newContents, "account-two");
+    account = "account-one";
+    assert.strictEqual((yield* expand("a.ts")).newContents, "account-one");
+    assert.deepStrictEqual(reads, ["account-one:a.ts", "account-two:b.ts", "account-one:a.ts"]);
+    assert.strictEqual(acquisitions, 4);
+  }),
+);
+
 it.effect(
   "does not refine a sibling collection from a configured Server collection on the same host",
   () =>
@@ -8191,4 +8271,124 @@ it.effect(
         1,
       );
     }),
+);
+
+it.effect("expands only files the change request changes, across every slice of its diff", () =>
+  Effect.gen(function* () {
+    const read: Array<string> = [];
+    const service = yield* makeService({
+      projects: [
+        project({ id: "p1", title: "t3code", workspaceRoot: "/a", repository: "pingdotgg/t3code" }),
+      ],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          getDiff: (input) =>
+            Effect.succeed(
+              input.cursor === undefined
+                ? {
+                    patch: [
+                      "diff --git a/src/old.ts b/src/new.ts",
+                      "rename from src/old.ts",
+                      "rename to src/new.ts",
+                      "--- a/src/old.ts",
+                      "+++ b/src/new.ts",
+                      "",
+                    ].join("\n"),
+                    truncated: false,
+                    nextCursor: "2",
+                  }
+                : {
+                    patch: [
+                      "diff --git a/gone.md b/gone.md",
+                      "deleted file mode 100644",
+                      "--- a/gone.md",
+                      "+++ /dev/null",
+                      "",
+                    ].join("\n"),
+                    truncated: false,
+                    nextCursor: null,
+                  },
+            ),
+          getDiffFileContents: (input) =>
+            Effect.sync(() => {
+              read.push(`${input.oldPath}->${input.newPath}`);
+              return { oldContents: "old", newContents: "new" };
+            }),
+        }),
+      ],
+    });
+    const ref = { projectId: "p1" as ProjectId, repository: "pingdotgg/t3code", number: 1 };
+
+    yield* service.diffFileContents({
+      ...ref,
+      changeType: "rename-changed",
+      oldPath: "src/old.ts",
+      newPath: "src/new.ts",
+    });
+    yield* service.diffFileContents({
+      ...ref,
+      changeType: "deleted",
+      oldPath: "gone.md",
+      newPath: "gone.md",
+    });
+    const outside = yield* service
+      .diffFileContents({ ...ref, changeType: "deleted", oldPath: ".env", newPath: ".env" })
+      .pipe(Effect.flip);
+    const halfRename = yield* service
+      .diffFileContents({
+        ...ref,
+        changeType: "change",
+        oldPath: "src/secret.ts",
+        newPath: "src/new.ts",
+      })
+      .pipe(Effect.flip);
+
+    assert.strictEqual(outside._tag, "PullRequestOperationError");
+    assert.strictEqual(halfRename._tag, "PullRequestOperationError");
+    assert.deepStrictEqual(read, ["src/old.ts->src/new.ts", "gone.md->gone.md"]);
+  }),
+);
+
+it.effect("checks expanded files against a diff too large to cache without fetching it again", () =>
+  Effect.gen(function* () {
+    let diffReads = 0;
+    const filler = `+${"x".repeat(300 * 1024)}`;
+    const service = yield* makeService({
+      projects: [
+        project({ id: "p1", title: "t3code", workspaceRoot: "/a", repository: "pingdotgg/t3code" }),
+      ],
+      providers: [
+        fakeProvider(SourceControlProviderKind.make("github"), {
+          getDiff: () =>
+            Effect.sync(() => {
+              diffReads += 1;
+              return {
+                patch: ["a.ts", "b.ts"]
+                  .flatMap((name) => [
+                    `diff --git a/${name} b/${name}`,
+                    `--- a/${name}`,
+                    `+++ b/${name}`,
+                    "@@ -0,0 +1 @@",
+                    filler,
+                  ])
+                  .join("\n"),
+                truncated: false,
+                nextCursor: null,
+              };
+            }),
+          getDiffFileContents: () => Effect.succeed({ oldContents: "old", newContents: "new" }),
+        }),
+      ],
+    });
+    const ref = { projectId: "p1" as ProjectId, repository: "pingdotgg/t3code", number: 1 };
+    for (const name of ["a.ts", "b.ts"]) {
+      yield* service.diffFileContents({
+        ...ref,
+        changeType: "change",
+        oldPath: name,
+        newPath: name,
+      });
+    }
+    assert.strictEqual(diffReads, 1);
+  }),
 );

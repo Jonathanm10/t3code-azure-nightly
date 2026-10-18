@@ -30,7 +30,13 @@ export const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9WQAAAAASUVORK5CYII=",
   "base64",
 );
-export const fixture = Effect.fnUntraced(function* () {
+export const fixture = Effect.fnUntraced(function* ({
+  authLayout = "legacy",
+  lastMigration = 62,
+}: {
+  readonly authLayout?: "legacy" | "current";
+  readonly lastMigration?: 62 | 63;
+} = {}) {
   const root = yield* Effect.acquireRelease(
     Effect.promise(async () =>
       NodeFSP.realpath(await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-copy-"))),
@@ -46,7 +52,7 @@ export const fixture = Effect.fnUntraced(function* () {
   yield* Effect.promise(() => NodeFSP.mkdir(sourceState));
   const filename = NodePath.join(sourceState, "statev2.sqlite");
   const sqlLayer = NodeSqliteClient.layer({ filename });
-  yield* runMigrations().pipe(Effect.provide(sqlLayer));
+  yield* runMigrations({ toMigrationInclusive: 62 }).pipe(Effect.provide(sqlLayer));
   const originalText = `Original é ☃ ![screenshot](${sourceState}/browser-artifacts/shot.png)`;
   yield* Effect.gen(function* () {
     const { parent } = yield* seed();
@@ -175,19 +181,21 @@ export const fixture = Effect.fnUntraced(function* () {
     (db) => Effect.sync(() => db.close()),
   );
   database.exec("PRAGMA journal_mode=WAL");
-  const authIndexes = database
-    .prepare(
-      "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='auth_sessions' AND sql IS NOT NULL",
-    )
-    .all();
-  database.exec("DROP TABLE auth_sessions");
-  database.exec(
-    "CREATE TABLE auth_sessions (\n      session_id TEXT PRIMARY KEY,\n      subject TEXT NOT NULL,\n      scopes TEXT NOT NULL,\n      method TEXT NOT NULL,\n      client_label TEXT,\n      client_ip_address TEXT,\n      client_user_agent TEXT,\n      client_device_type TEXT NOT NULL DEFAULT 'unknown',\n      client_os TEXT,\n      client_browser TEXT,\n      issued_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      last_connected_at TEXT,\n      revoked_at TEXT\n    )",
-  );
-  for (const index of authIndexes) if (typeof index.sql === "string") database.exec(index.sql);
-  database.exec(
-    "UPDATE effect_sql_migrations SET name='ProjectionTurnsReasoning' WHERE migration_id=41",
-  );
+  if (authLayout === "legacy") {
+    const authIndexes = database
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='auth_sessions' AND sql IS NOT NULL",
+      )
+      .all();
+    database.exec("DROP TABLE auth_sessions");
+    database.exec(
+      "CREATE TABLE auth_sessions (\n      session_id TEXT PRIMARY KEY,\n      subject TEXT NOT NULL,\n      scopes TEXT NOT NULL,\n      method TEXT NOT NULL,\n      client_label TEXT,\n      client_ip_address TEXT,\n      client_user_agent TEXT,\n      client_device_type TEXT NOT NULL DEFAULT 'unknown',\n      client_os TEXT,\n      client_browser TEXT,\n      issued_at TEXT NOT NULL,\n      expires_at TEXT NOT NULL,\n      last_connected_at TEXT,\n      revoked_at TEXT\n    )",
+    );
+    for (const index of authIndexes) if (typeof index.sql === "string") database.exec(index.sql);
+    database.exec(
+      "UPDATE effect_sql_migrations SET name='ProjectionTurnsReasoning' WHERE migration_id=41",
+    );
+  }
   for (const name of excludedStoreNames) {
     const table = { name };
     database.exec(`DELETE FROM "${table.name}"`);
@@ -212,6 +220,15 @@ export const fixture = Effect.fnUntraced(function* () {
   database
     .prepare("INSERT INTO checkpoint_diff_blobs VALUES (?, ?, ?, ?, ?)")
     .run("parent", 0, 1, Buffer.from([0, 255, 128, 65]), "2026-01-01T00:00:00.000Z");
+  database.exec(
+    "INSERT INTO projection_thread_activities (activity_id,thread_id,turn_id,tone,kind,summary,payload_json,created_at,sequence) VALUES ('legacy-activity','legacy-complete','legacy-complete:turn','info','legacy','Retained é ☃','{ \"value\": null }','2026-01-01T00:00:00.000Z',7)",
+  );
+  database.exec(
+    "INSERT INTO projection_thread_proposed_plans (plan_id,thread_id,turn_id,plan_markdown,created_at,updated_at) VALUES ('legacy-plan','legacy-complete','legacy-complete:turn','# Retained é ☃','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')",
+  );
+  database.exec(
+    "INSERT INTO projection_state (projector,last_applied_sequence,updated_at) VALUES ('legacy-projector',7,'2026-01-01T00:00:00.000Z')",
+  );
   database
     .prepare("INSERT INTO mcp_app_model_context VALUES (?, ?, ?, ?, ?, ?)")
     .run(
@@ -250,6 +267,8 @@ export const fixture = Effect.fnUntraced(function* () {
     await NodeFSP.writeFile(NodePath.join(sourceState, "secrets", "sentinel"), "source-secret");
     await NodeFSP.writeFile(NodePath.join(sourceState, "cookie-store"), "source-cookie");
   });
+  if (lastMigration === 63)
+    yield* runMigrations({ toMigrationInclusive: 63 }).pipe(Effect.provide(sqlLayer));
   return {
     root,
     sourceState,

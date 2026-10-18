@@ -1,6 +1,7 @@
-import { azureDevOpsServerProfiles } from "@t3tools/shared/azureDevOps";
-import { useMemo } from "react";
-import { resolveAzureDevOpsServerAddress } from "@t3tools/shared/azureDevOps";
+import {
+  azureDevOpsServerProfiles,
+  resolveAzureDevOpsServerAddress,
+} from "@t3tools/shared/azureDevOps";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import type {
   AzureDevOpsServerProfile,
@@ -28,7 +29,11 @@ import {
   parseChangeRequestUrl,
   type ChangeRequestLink,
 } from "~/lib/openPullRequestLink";
-import { useProjects, useServerConfigs } from "~/state/entities";
+import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { useProjects } from "~/state/entities";
+import { environmentServerConfigsAtom } from "~/state/server";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
 
@@ -43,85 +48,92 @@ export function canLinkChangeRequest(
   return findProjectForChangeRequest(projects, parsed, () => profiles) !== undefined;
 }
 
+// A string, so provider status pushes and snapshots that keep the mode don't
+// re-render every link renderer.
+const linkModeAtom = Atom.family((environmentId: EnvironmentId | null) =>
+  Atom.make((get) =>
+    threadPullRequestLinkMode(
+      environmentId === null
+        ? undefined
+        : get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities,
+    ),
+  ).pipe(Atom.withLabel("pull-request-link-mode")),
+);
+
 export function usePullRequestLinking(environmentId: EnvironmentId | null | undefined) {
-  const configs = useServerConfigs();
   const projects = useProjects();
-  const capabilities =
-    environmentId == null ? undefined : configs.get(environmentId)?.environment.capabilities;
-  const mode = threadPullRequestLinkMode(capabilities);
+  const mode = useAtomValue(linkModeAtom(environmentId ?? null));
   const link = useAtomCommand(threadEnvironment.linkPullRequest, { reportFailure: false });
   const unlink = useAtomCommand(threadEnvironment.unlinkPullRequest, { reportFailure: false });
   const updateMetadata = useAtomCommand(threadEnvironment.updateMetadata, { reportFailure: false });
-  return useMemo(() => {
-    const profiles =
-      environmentId == null
-        ? []
-        : azureDevOpsServerProfiles(
-            configs.get(environmentId)?.settings ?? { sourceControlHosts: {} },
-          );
-    const environmentProjects = projects.filter(
-      (project) => project.environmentId === environmentId,
-    );
-    const canLink = (url: string) => {
-      const parsed = parseChangeRequestUrl(url, profiles);
-      return parsed !== null && canLinkChangeRequest(mode, environmentProjects, parsed, profiles);
-    };
-    const isLinked = (
-      thread: {
-        readonly pullRequests?: readonly ThreadPullRequestLink[];
-        readonly linkedPullRequest?: ThreadLinkedPullRequest | null | undefined;
-      } | null,
-      url: string,
-    ) => {
-      if (thread === null || mode === "unsupported") return false;
-      if (mode !== "multiple")
-        return (
-          thread.linkedPullRequest != null &&
-          matchesLinkedPullRequestUrl(thread.linkedPullRequest, url, profiles)
+  const environmentProjects = projects.filter((project) => project.environmentId === environmentId);
+  const readProfiles = () =>
+    environmentId == null
+      ? []
+      : azureDevOpsServerProfiles(
+          appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.settings ?? {
+            sourceControlHosts: {},
+          },
         );
-      const parsed = parseChangeRequestUrl(url, profiles);
+  const canLink = (url: string) => {
+    const profiles = readProfiles();
+    const parsed = parseChangeRequestUrl(url, profiles);
+    return parsed !== null && canLinkChangeRequest(mode, environmentProjects, parsed, profiles);
+  };
+  const isLinked = (
+    thread: {
+      readonly pullRequests?: readonly ThreadPullRequestLink[];
+      readonly linkedPullRequest?: ThreadLinkedPullRequest | null | undefined;
+    } | null,
+    url: string,
+  ) => {
+    if (thread === null || mode === "unsupported") return false;
+    const profiles = readProfiles();
+    if (mode !== "multiple")
       return (
-        parsed !== null &&
-        visibleThreadPullRequests(thread.pullRequests ?? []).some((entry) =>
-          threadPullRequestKeysEqual(entry, parsed, profiles),
-        )
+        thread.linkedPullRequest != null &&
+        matchesLinkedPullRequestUrl(thread.linkedPullRequest, url, profiles)
       );
-    };
-    const changeLink = async (threadRef: ScopedThreadRef, url: string, linked: boolean) => {
-      const parsed = parseChangeRequestUrl(url, profiles);
-      if (parsed === null || threadRef.environmentId !== environmentId || (linked && !canLink(url)))
-        throw new Error("The pull request is not available in this environment.");
-      const legacyProject = findProjectForChangeRequest(
-        environmentProjects,
-        parsed,
-        () => profiles,
-      );
-      const mutation = planThreadPullRequestMutation({
-        capabilities,
-        threadId: threadRef.threadId,
-        reference: { ...parsed, url },
-        legacyProjectId: legacyProject?.id ?? null,
-        legacyRepository:
-          resolveAzureDevOpsServerAddress(
-            legacyProject?.repositoryIdentity?.locator.remoteUrl ?? "",
-            profiles,
-          )?.repository ??
-          sourceControlRepositorySelector(legacyProject?.repositoryIdentity) ??
-          undefined,
-        linked,
-      });
-      if (mutation === null)
-        throw new Error("This environment does not support linking this pull request.");
-      const result = await (mutation.type === "thread.meta.update"
-        ? updateMetadata({ environmentId: threadRef.environmentId, input: mutation.input })
-        : mutation.type === "thread.pull-request.link"
-          ? link({ environmentId: threadRef.environmentId, input: mutation.input })
-          : unlink({ environmentId: threadRef.environmentId, input: mutation.input }));
-      if (result._tag === "Failure") {
-        if (isAtomCommandInterrupted(result)) throw new Error("Link update interrupted.");
-        throw squashAtomCommandFailure(result);
-      }
-    };
-    return { mode, canLink, isLinked, changeLink };
-  }, [capabilities, configs, environmentId, link, mode, projects, unlink, updateMetadata]);
+    const parsed = parseChangeRequestUrl(url, profiles);
+    return (
+      parsed !== null &&
+      visibleThreadPullRequests(thread.pullRequests ?? []).some((entry) =>
+        threadPullRequestKeysEqual(entry, parsed, profiles),
+      )
+    );
+  };
+  const changeLink = async (threadRef: ScopedThreadRef, url: string, linked: boolean) => {
+    const profiles = readProfiles();
+    const parsed = parseChangeRequestUrl(url, profiles);
+    if (parsed === null || threadRef.environmentId !== environmentId || (linked && !canLink(url)))
+      throw new Error("The pull request is not available in this environment.");
+    const legacyProject = findProjectForChangeRequest(environmentProjects, parsed, () => profiles);
+    const mutation = planThreadPullRequestMutation({
+      capabilities: appAtomRegistry.get(environmentServerConfigsAtom).get(threadRef.environmentId)
+        ?.environment.capabilities,
+      threadId: threadRef.threadId,
+      reference: { ...parsed, url },
+      legacyProjectId: legacyProject?.id ?? null,
+      legacyRepository:
+        resolveAzureDevOpsServerAddress(
+          legacyProject?.repositoryIdentity?.locator.remoteUrl ?? "",
+          profiles,
+        )?.repository ??
+        sourceControlRepositorySelector(legacyProject?.repositoryIdentity) ??
+        undefined,
+      linked,
+    });
+    if (mutation === null)
+      throw new Error("This environment does not support linking this pull request.");
+    const result = await (mutation.type === "thread.meta.update"
+      ? updateMetadata({ environmentId: threadRef.environmentId, input: mutation.input })
+      : mutation.type === "thread.pull-request.link"
+        ? link({ environmentId: threadRef.environmentId, input: mutation.input })
+        : unlink({ environmentId: threadRef.environmentId, input: mutation.input }));
+    if (result._tag === "Failure") {
+      if (isAtomCommandInterrupted(result)) throw new Error("Link update interrupted.");
+      throw squashAtomCommandFailure(result);
+    }
+  };
+  return { mode, canLink, isLinked, changeLink };
 }

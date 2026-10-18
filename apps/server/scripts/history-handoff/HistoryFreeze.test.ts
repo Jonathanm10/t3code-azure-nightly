@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as NodePath from "@effect/platform-node/NodePath";
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem";
 import {
   CommandId,
   DEFAULT_SERVER_SETTINGS,
@@ -39,6 +40,7 @@ import {
 } from "../../src/orchestration-v2/RestartContinuation.ts";
 import * as ThreadManagementService from "../../src/orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../../src/serverSettings.ts";
+import * as ServerConfig from "../../src/config.ts";
 import * as ProjectStore from "../../src/orchestration-v2/ProjectStore.ts";
 import * as GitVcsDriver from "../../src/vcs/GitVcsDriver.ts";
 import { autoPullProjects } from "../../src/serverRuntimeStartup.ts";
@@ -118,6 +120,10 @@ it.effect("prevents native rollback and fork consumers from addressing the origi
             }),
             FileSystem.layerNoop({ exists: () => Effect.succeed(true) }),
             NodePath.layer,
+            ServerConfig.layerTest("/tmp/history-freeze-worktrees", {
+              prefix: "t3-history-freeze-",
+            }).pipe(Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodePath.layer))),
+            ServerSettings.layerTest(),
             RuntimePolicy.layer,
             IdAllocator.layer,
             ThreadCommandExecutor.layer,

@@ -20,16 +20,18 @@ import {
   assertDestinationHistorySchema,
 } from "./HistoryCapturePolicy.ts";
 
-it.effect(
-  "admits the supplied source schema and rejects the distinct fresh schema, unknown schema and migration drift",
-  () =>
+it.effect.each([62, 63] as const)(
+  "admits paired source profiles at migration %s and rejects schema or ledger drift",
+  (lastMigration) =>
     Effect.gen(function* () {
       const root = yield* Effect.acquireRelease(
         Effect.promise(() => NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-capture-policy-"))),
         (directory) => Effect.promise(() => NodeFSP.rm(directory, { recursive: true })),
       );
       const filename = NodePath.join(root, "statev2.sqlite");
-      yield* runMigrations().pipe(Effect.provide(NodeSqliteClient.layer({ filename })));
+      yield* runMigrations({ toMigrationInclusive: lastMigration }).pipe(
+        Effect.provide(NodeSqliteClient.layer({ filename })),
+      );
       yield* Effect.sync(() => {
         const db = new NodeSqlite.DatabaseSync(filename);
         try {
@@ -37,7 +39,12 @@ it.effect(
             "table-definition-mismatch (projection_turns)",
           );
           db.exec("ALTER TABLE projection_turns ADD COLUMN reasoning_json TEXT");
-          expect(assertDestinationHistorySchema(db)).toMatch(/^[a-f0-9]{64}$/);
+          const currentPolicyDigest = assertSourceHistorySchema(db);
+          expect(currentPolicyDigest).toMatch(/^[a-f0-9]{64}$/);
+          if (lastMigration === 63)
+            expect(assertDestinationHistorySchema(db)).toBe(currentPolicyDigest);
+          else
+            expect(() => assertDestinationHistorySchema(db)).toThrow("migration-ledger-mismatch");
           db.exec(
             "UPDATE effect_sql_migrations SET name='ProjectionTurnsReasoning' WHERE migration_id=41",
           );
@@ -61,7 +68,7 @@ it.effect(
           db.exec(
             "UPDATE effect_sql_migrations SET name='ProjectionTurnsReasoning' WHERE migration_id=41",
           );
-          expect(assertSourceHistorySchema(db)).toMatch(/^[a-f0-9]{64}$/);
+          expect(assertSourceHistorySchema(db)).toBe(currentPolicyDigest);
           db.exec("CREATE TABLE unreviewed_secret (value TEXT)");
           expect(() => assertSourceHistorySchema(db)).toThrow("table-inventory-mismatch");
           db.exec("DROP TABLE unreviewed_secret");
@@ -74,8 +81,25 @@ it.effect(
           db.exec("CREATE VIEW unexpected_view AS SELECT title FROM projection_projects");
           expect(() => assertSourceHistorySchema(db)).toThrow("unexpected-trigger-or-view");
           db.exec("DROP VIEW unexpected_view");
-          db.exec("UPDATE effect_sql_migrations SET name = 'wrong' WHERE migration_id = 62");
+          db.exec(
+            "CREATE TRIGGER unexpected_trigger AFTER INSERT ON projection_projects BEGIN SELECT 1; END",
+          );
+          expect(() => assertSourceHistorySchema(db)).toThrow("unexpected-trigger-or-view");
+          db.exec("DROP TRIGGER unexpected_trigger");
+          db.exec("PRAGMA user_version=1");
+          expect(() => assertSourceHistorySchema(db)).toThrow("user-version-mismatch");
+          db.exec("PRAGMA user_version=0");
+          db.exec(
+            "INSERT INTO effect_sql_migrations (migration_id,name) VALUES (64,'UnreviewedMigration')",
+          );
           expect(() => assertSourceHistorySchema(db)).toThrow("migration-ledger-mismatch");
+          db.exec("DELETE FROM effect_sql_migrations WHERE migration_id=64");
+          db.exec(
+            `UPDATE effect_sql_migrations SET name = 'wrong' WHERE migration_id = ${lastMigration}`,
+          );
+          expect(() => assertSourceHistorySchema(db)).toThrow("migration-ledger-mismatch");
+          db.exec("DROP TABLE projection_turns");
+          expect(() => assertSourceHistorySchema(db)).toThrow("table-inventory-mismatch");
         } finally {
           db.close();
         }
