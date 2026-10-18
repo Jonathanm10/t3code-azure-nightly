@@ -42,25 +42,12 @@ function run(command, args, options = {}) {
     });
   } catch (error) {
     const diagnostic =
-      command === "/usr/bin/codesign" || (command === "/usr/bin/xcrun" && args[0] === "stapler")
+      command === "/usr/bin/codesign"
         ? ` ${JSON.stringify({ status: error?.status ?? null, stderr: String(error?.stderr ?? "").slice(0, 4096), stdout: String(error?.stdout ?? "").slice(0, 4096) })}`
         : "";
     // oxlint-disable-next-line preserve-caught-error -- Subprocess causes can expose signing inputs and arguments.
     throw new Error(`Trusted release command failed: ${NodePath.basename(command)}${diagnostic}`);
   }
-}
-function staple(target) {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      run("/usr/bin/xcrun", ["stapler", "staple", target]);
-      break;
-    } catch (error) {
-      // Apple's ticket service drops hosted-runner connections after notarization is accepted.
-      if (attempt === 5 || !String(error?.message).includes("NSURLErrorDomain")) throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, attempt * 15_000);
-    }
-  }
-  run("/usr/bin/xcrun", ["stapler", "validate", target]);
 }
 const provenance = JSON.parse(
   NodeFS.readFileSync(NodePath.join(input, "azure-nightly-provenance.json"), "utf8"),
@@ -201,36 +188,6 @@ try {
     `=anchor apple generic and identifier "com.jonathanm10.t3code.azure" and certificate leaf[subject.OU] = "${team}"`,
     app,
   ]);
-  const keyPath = NodePath.join(temporary, "notary.p8");
-  NodeFS.writeFileSync(keyPath, Buffer.from(required("FORK_NOTARY_KEY_BASE64"), "base64"), {
-    mode: 0o600,
-  });
-  delete process.env.FORK_NOTARY_KEY_BASE64;
-  const notaryArgs = [
-    "--key",
-    keyPath,
-    "--key-id",
-    required("FORK_NOTARY_KEY_ID"),
-    "--issuer",
-    required("FORK_NOTARY_ISSUER"),
-  ];
-  const preStapleZip = NodePath.join(temporary, "notarize.zip");
-  run("/usr/bin/ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", app, preStapleZip]);
-  const notarization = JSON.parse(
-    run("/usr/bin/xcrun", [
-      "notarytool",
-      "submit",
-      preStapleZip,
-      ...notaryArgs,
-      "--wait",
-      "--output-format",
-      "json",
-    ]),
-  );
-  if (notarization.status !== "Accepted") throw new Error("Apple did not accept notarization.");
-  console.info(JSON.stringify({ notarizationId: notarization.id, status: notarization.status }));
-  staple(app);
-  run("/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=2", app]);
   NodeFS.mkdirSync(output, { recursive: true });
   const zipName = `T3-Code-Azure-${provenance.version}-arm64.zip`;
   const dmgName = `T3-Code-Azure-${provenance.version}-arm64.dmg`;
@@ -261,19 +218,6 @@ try {
     "--timestamp",
     NodePath.join(output, dmgName),
   ]);
-  const dmgNotary = JSON.parse(
-    run("/usr/bin/xcrun", [
-      "notarytool",
-      "submit",
-      NodePath.join(output, dmgName),
-      ...notaryArgs,
-      "--wait",
-      "--output-format",
-      "json",
-    ]),
-  );
-  if (dmgNotary.status !== "Accepted") throw new Error("Apple did not accept DMG notarization.");
-  staple(NodePath.join(output, dmgName));
   for (const { name, archivePath } of packages) {
     NodeFS.copyFileSync(archivePath, NodePath.join(output, name));
   }
@@ -301,7 +245,6 @@ try {
         ...provenance,
         signingIdentitySha1: identity,
         teamId: team,
-        notarizationId: notarization.id,
         packages: packageProvenance,
         cli: linux.provenance,
         assets,

@@ -216,15 +216,12 @@ jobs:
         with:
           name: azure-nightly-linux
           path: unsigned
-      - name: Sign and notarize artifacts without executing candidate code
+      - name: Sign artifacts with the Apple Development identity without executing candidate code
         env:
           FORK_SIGNING_P12_BASE64: ${{ secrets.FORK_SIGNING_P12_BASE64 }}
           FORK_SIGNING_P12_PASSWORD: ${{ secrets.FORK_SIGNING_P12_PASSWORD }}
           FORK_SIGNING_IDENTITY_SHA1: ${{ vars.FORK_SIGNING_IDENTITY_SHA1 }}
           FORK_APPLE_TEAM_ID: ${{ vars.FORK_APPLE_TEAM_ID }}
-          FORK_NOTARY_KEY_BASE64: ${{ secrets.FORK_NOTARY_KEY_BASE64 }}
-          FORK_NOTARY_KEY_ID: ${{ vars.FORK_NOTARY_KEY_ID }}
-          FORK_NOTARY_ISSUER: ${{ vars.FORK_NOTARY_ISSUER }}
           EXPECTED_SOURCE_SHA: ${{ needs.integrate.outputs.source_sha }}
           EXPECTED_VERSION: ${{ needs.integrate.outputs.version }}
           EXPECTED_UPSTREAM_SHA: ${{ needs.integrate.outputs.upstream_sha }}
@@ -241,4 +238,4 @@ jobs:
           if-no-files-found: ignore
       - name: Retain the last good public release on failure
         if: failure()
-        run: echo 'Integration, checks, signing, notarization or publication failed. No previous release was deleted.' >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'Integration, checks, signing or publication failed. No previous release was deleted.' >> "$GITHUB_STEP_SUMMARY"

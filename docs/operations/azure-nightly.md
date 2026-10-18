@@ -32,16 +32,25 @@ Their absence fails the candidate before building.
 | `T3CODE_CLERK_CLI_OAUTH_CLIENT_ID` | CLI OAuth client identifier |
 | `T3CODE_RELAY_URL`                 | HTTPS Connect relay URL     |
 
-Set these environment references after the intended publisher's Developer ID
-identity and notarization access are explicitly approved. Select the exact
-certificate by its SHA-1 fingerprint.
+Releases are signed with the maintainer's Apple Development certificate, not a
+Developer ID, and are not notarized. macOS ties Keychain items to the signing
+team, so releases from the same team keep reading the safe storage key without a
+prompt. The in-app updater accepts a release only when it satisfies the installed
+app's designated requirement, which names that certificate under Apple's
+developer CA. Switching to another certificate breaks in-app updates and asks for
+Keychain access once, so installed apps then need one manual install.
 
-| Environment setting                                    | Kind                                                                 |
-| ------------------------------------------------------ | -------------------------------------------------------------------- |
-| `FORK_SIGNING_P12_BASE64`, `FORK_SIGNING_P12_PASSWORD` | Secrets                                                              |
-| `FORK_NOTARY_KEY_BASE64`                               | Secret containing the base64 App Store Connect API private key       |
-| `FORK_SIGNING_IDENTITY_SHA1`, `FORK_APPLE_TEAM_ID`     | Variables identifying the approved Developer ID certificate and team |
-| `FORK_NOTARY_KEY_ID`, `FORK_NOTARY_ISSUER`             | Variables identifying the notarization API key                       |
+| Environment setting                                    | Kind                                              |
+| ------------------------------------------------------ | ------------------------------------------------- |
+| `FORK_SIGNING_P12_BASE64`, `FORK_SIGNING_P12_PASSWORD` | Secrets holding the Apple Development identity    |
+| `FORK_SIGNING_IDENTITY_SHA1`, `FORK_APPLE_TEAM_ID`     | Variables selecting that certificate and its team |
+
+Gatekeeper rejects downloads that are not notarized, so install with
+`scripts/azure-nightly/install-macos.sh` while the app is quit. The script downloads
+the newest release with `curl`, which sets no quarantine attribute, checks the zip
+against the release feed and the bundle against the team, then replaces the app in
+`/Applications`. Updates installed by the app carry no quarantine either. Renew
+the certificate in Xcode before it expires, then confirm the next in-app update.
 
 The hourly controller skips unchanged upstream and maintained-fork commits using
 the last successful release provenance. Manual dispatch forces a build for
@@ -56,13 +65,12 @@ standalone packages whose provenance records a dirty source tree.
 
 The signing job checks out only the trusted controller commit. It validates and
 extracts the candidate as data, imports the approved identity into an ephemeral
-Keychain using a compiled Security-framework helper, signs, verifies, notarizes
-and staples the application and DMG. Passphrases travel through stdin, never
-process arguments. No candidate binary, dependency script or executable runs in
-this job. The identity import and Keychain ACL need a real signed CI run before
-they can be considered proven.
+Keychain using a compiled Security-framework helper, then signs and timestamps the
+application and DMG and verifies the team requirement. Passphrases travel through
+stdin, never process arguments. No candidate binary, dependency script or
+executable runs in this job.
 
-Only a checked, signed and notarized source commit advances `azure-nightly`.
+Only a checked and signed source commit advances `azure-nightly`.
 Publication creates a new draft, uploads the complete asset set, downloads and
 hashes every draft asset, then publishes once. An existing tag is never updated.
 The publisher verifies immutable-release status and downloads the public assets
@@ -119,7 +127,7 @@ operations and external protocol registration is disabled. No official cookies,
 credentials or encrypted connection files are imported.
 
 Root acceptance still requires signed A-to-B update through the real feed and
-existing UI, actual running and installed-byte checks, signature/notarization
+existing UI, actual running and installed-byte checks, signature
 verification, the same profile and synthetic encrypted/preview/backend sentinels,
 and a packaged native Azure read. A profile fixture or successful typecheck is
 not updater, Keychain, Apple account or runtime isolation proof.

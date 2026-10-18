@@ -97,7 +97,7 @@ Preserve existing entries. These callbacks are separate from the `t3code-dev` / 
 
 The Azure Nightly fork disables native Clerk passkeys and does not embed Associated Domains
 or passkey provisioning entitlements. The former local passkey build variables have no effect.
-Use the [fork release procedure](./azure-nightly.md) for signing and notarization.
+Use the [fork release procedure](./azure-nightly.md) for signing.
 
 ## Restricting sign-ups
 

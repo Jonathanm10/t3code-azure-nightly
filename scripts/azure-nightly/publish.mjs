@@ -23,8 +23,7 @@ if (
   !/^\d+\.\d+\.\d+-nightly\.\d{8}\.\d+$/.test(manifest.version) ||
   !/^[0-9a-f]{40}$/.test(manifest.sourceSha) ||
   manifest.controllerSha !== process.env.GITHUB_SHA ||
-  !/^[A-Fa-f0-9]{40}$/.test(manifest.signingIdentitySha1) ||
-  !manifest.notarizationId
+  !/^[A-Fa-f0-9]{40}$/.test(manifest.signingIdentitySha1)
 )
   throw new Error("Signed release provenance is incomplete.");
 const files = NodeFS.readdirSync(directory).map((name) => {
@@ -134,7 +133,7 @@ const draft = await api("/releases", {
     draft: true,
     prerelease: true,
     make_latest: "false",
-    body: `Upstream ${manifest.upstreamTag} (${manifest.upstreamSha}).\nFork source ${manifest.sourceSha}.\nController ${manifest.controllerSha}.\nSigned and notarized macOS arm64 and same-source Linux x64 CLI. Standalone Azure core and MCP packages are included.`,
+    body: `Upstream ${manifest.upstreamTag} (${manifest.upstreamSha}).\nFork source ${manifest.sourceSha}.\nController ${manifest.controllerSha}.\nApple Development-signed macOS arm64 and same-source Linux x64 CLI. Standalone Azure core and MCP packages are included.`,
   }),
 });
 for (const file of files) {

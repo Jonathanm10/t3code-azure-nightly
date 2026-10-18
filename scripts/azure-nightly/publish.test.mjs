@@ -36,7 +36,6 @@ async function fixture(t, tampered = false, invalid = "") {
     upstreamSha: "b".repeat(40),
     controllerSha: "c".repeat(40),
     signingIdentitySha1: "d".repeat(40),
-    notarizationId: "fixture-notary",
     assets,
     cli:
       invalid === "missing-provenance"
