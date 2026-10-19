@@ -69,7 +69,7 @@ export const serverDefinition = defineSourceControlClient({
   kind: SourceControlProviderKind.make("azure-devops-server"),
   label: "Azure DevOps Server",
   pickerLabel: "Azure DevOps Server",
-  publishDescription: "Read-only collection",
+  publishDescription: "Publishing unavailable",
   defaultCloneTransport: "https",
   changeRequestActions: new Set<never>(),
   checkoutCommand: () => null,

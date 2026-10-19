@@ -138,8 +138,8 @@ function AzureDevOpsServerProfileEditor({
     <>
       <div className="space-y-3 px-4 py-3">
         <p className="text-sm text-muted-foreground">
-          Read pull requests using Git authentication on this environment. Add the collection URL
-          used by your HTTPS clone URL and, if different, its browser collection URL.
+          Read and create pull requests using Git authentication on this environment. Add the
+          collection URL used by your HTTPS clone URL and, if different, its browser collection URL.
         </p>
         {profiles.map((profile, index) => (
           <div key={profile.key} className="space-y-2 rounded-md border p-3">

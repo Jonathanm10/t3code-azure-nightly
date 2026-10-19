@@ -104,8 +104,9 @@ Save the collections and open Pull Requests. Authentication uses the checkout's 
 helper on the environment machine. No Azure CLI or token saved in T3 Code is required.
 
 Server integration reads lists, authorship, review requests, details, conversations, and diffs.
-Create PR, review writes, merge, and PR checkout are unavailable. Ordinary Git commit and push
-remain available. Use the host website for pull request changes.
+**Create PR**, **Push & create PR**, and **Commit, push & PR** open the pull request with the same
+Git credential, and its link uses the browser collection URL. Review writes, merge, PR checkout,
+and publishing a new repository are unavailable. Use the host website for those.
 
 ### GitCafe
 
