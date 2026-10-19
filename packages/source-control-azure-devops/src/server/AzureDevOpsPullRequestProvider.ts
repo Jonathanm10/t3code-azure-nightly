@@ -356,18 +356,23 @@ export const makeWithReader = Effect.fnUntraced(function* (
       Effect.gen(function* () {
         const pullRequest = yield* cli.getPullRequest({ cwd: input.cwd, number: input.number });
         const location = pullRequest.location;
+        const iterations =
+          location === null
+            ? []
+            : yield* cli
+                .listIterations({ cwd: input.cwd, location, number: input.number })
+                .pipe(Effect.orElseSucceed(() => []));
+        // The trial merge's lastMergeSourceCommit can lag behind a new source push.
+        const headSha = iterations.at(-1)?.headCommit;
         const changedFiles =
           location === null
             ? 0
-            : yield* cli.listIterations({ cwd: input.cwd, location, number: input.number }).pipe(
-                Effect.flatMap((iterations) =>
-                  listLatestChanges({
-                    cwd: input.cwd,
-                    location,
-                    number: input.number,
-                    iterations,
-                  }),
-                ),
+            : yield* listLatestChanges({
+                cwd: input.cwd,
+                location,
+                number: input.number,
+                iterations,
+              }).pipe(
                 Effect.map((listed) => listed.changes.length),
                 Effect.catch((error) =>
                   server === undefined ? Effect.succeed(0) : Effect.fail(error),
@@ -376,6 +381,7 @@ export const makeWithReader = Effect.fnUntraced(function* (
         const detail: ProviderChangeRequestDetail = {
           ...toChangeRequest(pullRequest),
           body: pullRequest.body,
+          ...(headSha === undefined ? {} : { headSha }),
           changedFiles,
           mergedAt: pullRequest.state === "merged" ? pullRequest.closedAt : null,
           closedAt: pullRequest.state === "closed" ? pullRequest.closedAt : null,
