@@ -9,6 +9,7 @@ import {
   type PullRequestRef,
   type PullRequestReviewGuideResult,
   type ThreadPullRequestLink,
+  type AzureDevOpsServerProfile,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Crypto from "effect/Crypto";
@@ -26,6 +27,7 @@ import {
 } from "../../../orchestration-v2/testkit/pullRequestFixtures.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as PullRequestReviewGuideService from "../../../pullRequest/PullRequestReviewGuideService.ts";
+import { ServerSettingsService } from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
@@ -139,6 +141,7 @@ interface HarnessOptions {
   readonly project?: OrchestrationProjectShell | null;
   readonly reject?: (command: OrchestrationCommand) => string | null;
   readonly projects?: ReadonlyArray<OrchestrationProjectShell>;
+  readonly profiles?: ReadonlyArray<AzureDevOpsServerProfile>;
   readonly generate?: (
     input: PullRequestRef,
   ) => Effect.Effect<
@@ -198,6 +201,11 @@ const makeHarness = Effect.fn("makePullRequestsToolkitHarness")(function* (
     }),
     Layer.succeed(Crypto.Crypto, testCrypto),
     McpToolAccessTestkit.liveThreadsLayer,
+    options.profiles === undefined
+      ? Layer.empty
+      : ServerSettingsService.layerTest({
+          sourceControlHosts: { "azure-devops-server": { profiles: options.profiles } },
+        }),
   );
   const toolkit = yield* PullRequestsToolkit.pipe(
     Effect.provide(
@@ -235,6 +243,32 @@ describe("pull request toolkit handlers", () => {
         capability: "pull-requests",
         threadId: THREAD_ID,
       });
+      expect(yield* Ref.get(harness.commands)).toEqual([]);
+    }),
+  );
+
+  it.effect("finds a created Azure DevOps Server link through either collection URL", () =>
+    Effect.gen(function* () {
+      const browserUrl = "https://web.example.test/tfs/C/P/_git/Repo/pullrequest/7";
+      const harness = yield* makeHarness({
+        profiles: [
+          {
+            apiCollectionUrl: "https://git.example.test/tfs/C",
+            browserCollectionUrl: "https://web.example.test/tfs/C",
+          },
+        ],
+        thread: makeThread([
+          makeLink(7, {
+            host: "web.example.test",
+            repository: "tfs/c/p/_git/repo",
+            url: browserUrl,
+            source: "created",
+          }),
+        ]),
+      });
+      for (const url of [browserUrl, "https://git.example.test/tfs/C/P/_git/Repo/pullrequest/7"]) {
+        expect((yield* harness.call("link_pull_request", { url })).alreadyLinked).toBe(true);
+      }
       expect(yield* Ref.get(harness.commands)).toEqual([]);
     }),
   );

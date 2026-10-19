@@ -113,6 +113,19 @@ describe("createdPullRequestKey", () => {
     });
   });
 
+  it("keys an Azure DevOps Server pull request by the browser URL it was created with", () => {
+    expect(
+      createdPullRequestKey(
+        prResult({
+          status: "created",
+          number: 7,
+          url: "https://web.example.test/tfs/C/P/_git/Repo/pullrequest/7",
+        }),
+        project,
+      ),
+    ).toMatchObject({ host: "web.example.test", repository: "tfs/c/p/_git/repo", number: 7 });
+  });
+
   it("falls back to the project's host and repository for an unreadable URL", () => {
     expect(
       createdPullRequestKey(
