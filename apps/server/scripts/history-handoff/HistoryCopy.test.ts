@@ -268,8 +268,10 @@ it("distinguishes real Markdown destinations, code literals, escaped links, file
 it.effect.each([
   { authLayout: "legacy", lastMigration: 62 },
   { authLayout: "legacy", lastMigration: 63 },
+  { authLayout: "legacy", lastMigration: 64 },
   { authLayout: "current", lastMigration: 62 },
   { authLayout: "current", lastMigration: 63 },
+  { authLayout: "current", lastMigration: 64 },
 ] as const)(
   "copies $authLayout history at migration $lastMigration, excludes operational state and rejects installed divergence",
   (sourceProfile) =>
@@ -327,7 +329,7 @@ it.effect.each([
         ).toBe(sourceProfile.lastMigration);
         expect(
           target.prepare("SELECT MAX(migration_id) AS id FROM effect_sql_migrations").get()?.id,
-        ).toBe(63);
+        ).toBe(64);
         expect(assertDestinationHistorySchema(target)).toBe(result.receipt.cut.policyDigest);
         expect(result.receipt.cut.agentSequence).toBeLessThan(9999);
         expect(tableDigest(target, "orchestration_v2_events")).toEqual(

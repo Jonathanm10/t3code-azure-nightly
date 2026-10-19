@@ -35,7 +35,7 @@ export const fixture = Effect.fnUntraced(function* ({
   lastMigration = 62,
 }: {
   readonly authLayout?: "legacy" | "current";
-  readonly lastMigration?: 62 | 63;
+  readonly lastMigration?: 62 | 63 | 64;
 } = {}) {
   const root = yield* Effect.acquireRelease(
     Effect.promise(async () =>
@@ -267,8 +267,8 @@ export const fixture = Effect.fnUntraced(function* ({
     await NodeFSP.writeFile(NodePath.join(sourceState, "secrets", "sentinel"), "source-secret");
     await NodeFSP.writeFile(NodePath.join(sourceState, "cookie-store"), "source-cookie");
   });
-  if (lastMigration === 63)
-    yield* runMigrations({ toMigrationInclusive: 63 }).pipe(Effect.provide(sqlLayer));
+  if (lastMigration !== 62)
+    yield* runMigrations({ toMigrationInclusive: lastMigration }).pipe(Effect.provide(sqlLayer));
   return {
     root,
     sourceState,

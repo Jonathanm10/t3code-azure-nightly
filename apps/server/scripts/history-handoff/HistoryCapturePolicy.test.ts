@@ -20,7 +20,7 @@ import {
   assertDestinationHistorySchema,
 } from "./HistoryCapturePolicy.ts";
 
-it.effect.each([62, 63] as const)(
+it.effect.each([62, 63, 64] as const)(
   "admits paired source profiles at migration %s and rejects schema or ledger drift",
   (lastMigration) =>
     Effect.gen(function* () {
@@ -41,7 +41,7 @@ it.effect.each([62, 63] as const)(
           db.exec("ALTER TABLE projection_turns ADD COLUMN reasoning_json TEXT");
           const currentPolicyDigest = assertSourceHistorySchema(db);
           expect(currentPolicyDigest).toMatch(/^[a-f0-9]{64}$/);
-          if (lastMigration === 63)
+          if (lastMigration === 64)
             expect(assertDestinationHistorySchema(db)).toBe(currentPolicyDigest);
           else
             expect(() => assertDestinationHistorySchema(db)).toThrow("migration-ledger-mismatch");
@@ -90,10 +90,10 @@ it.effect.each([62, 63] as const)(
           expect(() => assertSourceHistorySchema(db)).toThrow("user-version-mismatch");
           db.exec("PRAGMA user_version=0");
           db.exec(
-            "INSERT INTO effect_sql_migrations (migration_id,name) VALUES (64,'UnreviewedMigration')",
+            "INSERT INTO effect_sql_migrations (migration_id,name) VALUES (65,'UnreviewedMigration')",
           );
           expect(() => assertSourceHistorySchema(db)).toThrow("migration-ledger-mismatch");
-          db.exec("DELETE FROM effect_sql_migrations WHERE migration_id=64");
+          db.exec("DELETE FROM effect_sql_migrations WHERE migration_id=65");
           db.exec(
             `UPDATE effect_sql_migrations SET name = 'wrong' WHERE migration_id = ${lastMigration}`,
           );

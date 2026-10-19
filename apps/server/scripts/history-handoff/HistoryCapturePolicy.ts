@@ -836,14 +836,16 @@ const currentAuthColumns = "f9ef9c3d9fe88a5feaa433b7ecb3cf290a463cba4593a3dc6b32
 const expectedUniqueIndexes = "2e230c1606839be52b710c87f65c453531464b3fba022dcc4efbe6c1c716b549";
 
 const expectedBuildMigrationHash =
-  "96a20fec0f0e5cb0a7665c49590cc497ffb040ba65e3cd0505072921d6499273";
+  "9fc230e09dcadc20f34a158e38eb011962877db871f9f7f61f900df5139f5e7c";
 const acceptedSourceMigrationHashes = {
   legacyAuth: [
     "69339dc0950879116602628e65c953accdc8a958a1e9c2af249bbe3d2b298bf4",
     "35b742ef99cc802eb095f4ff84963bf015a6e19de1d22d8bc6bd423b4238fabd",
+    "24e48957ed753d206df7adc68d13185d2203f62099fd67b2728c7312f4823dd9",
   ],
   currentAuth: [
     "74a03d352f96bad31b09f3142f18018f94271aa9f65d3f77f2f827e1ab3a590e",
+    "96a20fec0f0e5cb0a7665c49590cc497ffb040ba65e3cd0505072921d6499273",
     expectedBuildMigrationHash,
   ],
 } as const;
