@@ -1,4 +1,4 @@
-import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, SourceControlProviderKind } from "@t3tools/contracts";
 // @effect-diagnostics nodeBuiltinImport:off - This integration fixture exercises the real Git helper subprocess and its stdin protocol.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -52,6 +52,28 @@ function requestUrl(request: HttpClientRequest.HttpClientRequest) {
     url.searchParams.append(key, Redacted.isRedacted(value) ? Redacted.value(value) : value);
   return url;
 }
+
+function requestJson(request: HttpClientRequest.HttpClientRequest) {
+  return request.body._tag === "Uint8Array"
+    ? JSON.parse(new TextDecoder().decode(request.body.body))
+    : undefined;
+}
+
+const serverContext = {
+  provider: {
+    kind: SourceControlProviderKind.make("azure-devops-server"),
+    name: "Azure DevOps Server",
+    baseUrl: profiles[0]!.apiCollectionUrl,
+  },
+  remoteName: "origin",
+  remoteUrl: cloneUrl,
+};
+
+const serverSourceControl = (api: AzureDevOpsServerApi.AzureDevOpsServerApi["Service"]) =>
+  AzureSourceProvider.makeServer.pipe(
+    Effect.provideService(AzureDevOpsServerApi.AzureDevOpsServerApi, api),
+    Effect.provide(NodeServices.layer),
+  );
 
 async function fixture() {
   const cwd = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-azure-git-"));
@@ -643,21 +665,12 @@ describe("Azure DevOps Server Git authentication", () => {
         );
         const result = yield* f.run((api) =>
           Effect.gen(function* () {
-            const source = yield* AzureSourceProvider.makeServer.pipe(
-              Effect.provideService(AzureDevOpsServerApi.AzureDevOpsServerApi, api),
-            );
+            const source = yield* serverSourceControl(api);
             const branch = yield* source.getDefaultBranch({ cwd: f.cwd });
             const refused = yield* Effect.all(
               [
                 source.checkoutChangeRequest({ cwd: f.cwd, reference: "42" }),
                 source.getRepositoryCloneUrls({ cwd: f.cwd, repository: "Repo" }),
-                source.createChangeRequest({
-                  cwd: f.cwd,
-                  baseRefName: "main",
-                  headSelector: "feature",
-                  title: "title",
-                  bodyFile: "unused",
-                }),
                 source.createRepository({ cwd: f.cwd, repository: "Repo", visibility: "private" }),
               ].map((operation) => operation.pipe(Effect.result)),
             );
@@ -668,6 +681,91 @@ describe("Azure DevOps Server Git authentication", () => {
         expect(result.refused.every(Result.isFailure)).toBe(true);
         expect(f.commands.every((command) => command.command === "git")).toBe(true);
       }),
+  );
+
+  it.effect(
+    "creates a Server pull request on the API host with the checkout's Git credential",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* Effect.acquireRelease(Effect.promise(fixture), (fixture) =>
+          Effect.promise(fixture.close),
+        );
+        const bodyFile = NodePath.join(f.cwd, "pull-request-body.md");
+        yield* Effect.promise(() => NodeFSP.writeFile(bodyFile, "Generated description\n"));
+        f.setResponse((request) =>
+          requestUrl(request).pathname.endsWith("/_apis/connectionData")
+            ? Response.json({ authorizedUser: { id: viewer } })
+            : Response.json(pullRequest, { status: 201 }),
+        );
+        yield* f.run((api) =>
+          serverSourceControl(api).pipe(
+            Effect.flatMap((source) =>
+              source.createChangeRequest({
+                cwd: f.cwd,
+                context: serverContext,
+                baseRefName: "main",
+                headSelector: "feature/create",
+                title: "Create Server pull requests",
+                bodyFile,
+              }),
+            ),
+          ),
+        );
+        const writes = f.requests.filter((request) => request.method !== "GET");
+        expect(writes.map((request) => [request.method, requestUrl(request).href])).toEqual([
+          [
+            "POST",
+            "https://git.example.test/tfs/Collection/Project/_apis/git/repositories/Repo/pullRequests?api-version=6.0",
+          ],
+        ]);
+        expect(requestJson(writes[0]!)).toEqual({
+          title: "Create Server pull requests",
+          description: "Generated description\n",
+          sourceRefName: "refs/heads/feature/create",
+          targetRefName: "refs/heads/main",
+          isDraft: false,
+        });
+        expect(writes[0]!.headers.authorization).toBe(
+          `Basic ${Buffer.from(`${viewer}:synthetic-${viewer}`).toString("base64")}`,
+        );
+        expect(writes[0]!.headers["x-auth"]).toBe("synthetic-secondary");
+      }),
+  );
+
+  it.effect("reports a refused Server pull request creation as a permission failure", () =>
+    Effect.gen(function* () {
+      const f = yield* Effect.acquireRelease(Effect.promise(fixture), (fixture) =>
+        Effect.promise(fixture.close),
+      );
+      const bodyFile = NodePath.join(f.cwd, "pull-request-body.md");
+      yield* Effect.promise(() => NodeFSP.writeFile(bodyFile, "Generated description\n"));
+      f.setResponse((request) =>
+        requestUrl(request).pathname.endsWith("/_apis/connectionData")
+          ? Response.json({ authorizedUser: { id: viewer } })
+          : Response.json({ message: "synthetic-denied-body" }, { status: 403 }),
+      );
+      const failure = yield* f.run((api) =>
+        serverSourceControl(api).pipe(
+          Effect.flatMap((source) =>
+            source.createChangeRequest({
+              cwd: f.cwd,
+              context: serverContext,
+              baseRefName: "refs/heads/main",
+              headSelector: "feature/create",
+              title: "Create Server pull requests",
+              bodyFile,
+            }),
+          ),
+          Effect.flip,
+        ),
+      );
+      expect(failure.detail).toBe("The operation is not permitted.");
+      expect(failure.message).not.toContain("read-only");
+      expect(JSON.stringify(failure)).not.toContain("synthetic-");
+      const writes = f.requests.filter((request) => request.method !== "GET");
+      expect(writes).toHaveLength(1);
+      expect(requestJson(writes[0]!)).toMatchObject({ targetRefName: "refs/heads/main" });
+    }),
   );
 
   it.effect(

@@ -1,4 +1,5 @@
 import * as DateTime from "effect/DateTime";
+import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import { AzureDevOpsServerApi } from "./AzureDevOpsServerApi.ts";
 import type { AzureDevOpsPullRequest } from "./azureDevOpsPullRequestJson.ts";
@@ -244,9 +245,11 @@ export const make = Effect.gen(function* () {
 });
 
 const isSourceControlError = Schema.is(SourceControlProviderError);
+const branchRef = (branch: string) => `refs/heads/${branch.replace(/^refs\/heads\//u, "")}`;
 
 export const makeServer = Effect.gen(function* () {
   const api = yield* AzureDevOpsServerApi;
+  const fileSystem = yield* FileSystem.FileSystem;
   const asError = (cwd: string, operation: string) => (error: { readonly detail: string }) =>
     new SourceControlProviderError({
       provider: SourceControlProviderKind.make("azure-devops-server"),
@@ -260,7 +263,7 @@ export const makeServer = Effect.gen(function* () {
         provider: SourceControlProviderKind.make("azure-devops-server"),
         operation,
         cwd: input.cwd,
-        detail: "Azure DevOps Server is read-only in T3. This operation is unavailable.",
+        detail: "T3 does not support this Azure DevOps Server operation.",
       }),
     );
   const context = (input: {
@@ -340,7 +343,20 @@ export const makeServer = Effect.gen(function* () {
         .pipe(Effect.mapError(asError(input.cwd, "getDefaultBranch"))),
     getRepositoryCloneUrls: (input) => unsupported(input, "getRepositoryCloneUrls"),
     checkoutChangeRequest: (input) => unsupported(input, "checkoutChangeRequest"),
-    createChangeRequest: (input) => unsupported(input, "createChangeRequest"),
+    createChangeRequest: (input) =>
+      fileSystem.readFileString(input.bodyFile).pipe(
+        Effect.mapError(() => ({ detail: "The pull request description could not be read." })),
+        Effect.flatMap((description) =>
+          api.createPullRequest({
+            ...context(input),
+            title: input.title,
+            description,
+            sourceRef: branchRef(SourceControlProvider.sourceBranch(input)),
+            targetRef: branchRef(input.target?.refName ?? input.baseRefName),
+          }),
+        ),
+        Effect.mapError(asError(input.cwd, "createChangeRequest")),
+      ),
     createRepository: (input) => unsupported(input, "createRepository"),
   });
 });

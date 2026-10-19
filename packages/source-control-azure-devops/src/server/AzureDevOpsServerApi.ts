@@ -54,32 +54,46 @@ export class AzureDevOpsServerApi extends Context.Service<
     readonly getDefaultBranch: (
       input: ReadInput,
     ) => Effect.Effect<string | null, AzureDevOpsServerReadError>;
+    readonly createPullRequest: (
+      input: ReadInput & {
+        readonly title: string;
+        readonly description: string;
+        readonly sourceRef: string;
+        readonly targetRef: string;
+      },
+    ) => Effect.Effect<void, AzureDevOpsServerReadError>;
   }
 >()("@t3tools/source-control-azure-devops/server/AzureDevOpsServerApi") {}
 
 export const make = Effect.gen(function* () {
   const host = yield* SourceControlHost;
-  const client = yield* makeAzureServerClient({
-    profiles: host.settings.get.pipe(
-      Effect.map(azureDevOpsServerProfiles),
-      Effect.mapError(
-        () =>
-          new AzureDevOpsServerReadError({ operation: "configuration", category: "configuration" }),
-      ),
-    ),
-    process: {
-      run: (input) =>
-        host.process.run(input).pipe(
-          Effect.mapError(
-            () =>
-              new AzureDevOpsServerReadError({
-                operation: "gitAuthentication",
-                category: "authentication",
-              }),
-          ),
+  const client = yield* makeAzureServerClient(
+    {
+      profiles: host.settings.get.pipe(
+        Effect.map(azureDevOpsServerProfiles),
+        Effect.mapError(
+          () =>
+            new AzureDevOpsServerReadError({
+              operation: "configuration",
+              category: "configuration",
+            }),
         ),
+      ),
+      process: {
+        run: (input) =>
+          host.process.run(input).pipe(
+            Effect.mapError(
+              () =>
+                new AzureDevOpsServerReadError({
+                  operation: "gitAuthentication",
+                  category: "authentication",
+                }),
+            ),
+          ),
+      },
     },
-  });
+    "read-write",
+  );
   const fail = (
     operation: string,
     category: AzureDevOpsServerReadError["category"],
@@ -290,6 +304,19 @@ export const make = Effect.gen(function* () {
     ),
     getDefaultBranch: (input) =>
       read(input, (session) => session.execute("repositories.defaultBranch", location(session))),
+    createPullRequest: ({ title, description, sourceRef, targetRef, ...input }) =>
+      read(input, (session) =>
+        session
+          .execute("pullRequests.create", {
+            ...location(session),
+            title,
+            description,
+            sourceRef,
+            targetRef,
+            isDraft: false,
+          })
+          .pipe(Effect.asVoid),
+      ),
   });
 });
 export const layer = Layer.effect(AzureDevOpsServerApi, make);

@@ -176,7 +176,7 @@ export const makeWithReader = Effect.fnUntraced(function* (
         detail:
           server === undefined
             ? "Azure DevOps reviews cannot be written from here yet."
-            : "Azure DevOps Server is read-only in T3. This operation is unavailable.",
+            : "T3 does not support this Azure DevOps Server operation.",
       }),
     );
 
