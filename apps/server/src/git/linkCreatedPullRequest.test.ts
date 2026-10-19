@@ -21,6 +21,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import { refreshPushedPullRequests } from "./refreshPushedPullRequests.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 import { createdPullRequestKey, linkCreatedPullRequest } from "./linkCreatedPullRequest.ts";
 
 const PROJECT_ID = ProjectId.make("project-1");
@@ -74,8 +75,10 @@ function prResult(pr: GitRunStackedActionResult["pr"]): Pick<GitRunStackedAction
 const layerDependenciesFor = (
   dispatch: Orchestrator.OrchestratorV2Shape["dispatch"],
   threadShell: PullRequestTestThread | null = thread,
+  settings = ServerSettingsService.layerTest(),
 ) =>
   Layer.mergeAll(
+    settings,
     Layer.mock(ProjectService.ProjectService)({
       getShell: () => Effect.succeedSome(project),
     }),
@@ -187,6 +190,51 @@ describe("linkCreatedPullRequest", () => {
         },
       ]);
     }),
+  );
+
+  it.effect(
+    "links a created Azure DevOps Server pull request once whichever collection URL linked it first",
+    () =>
+      Effect.gen(function* () {
+        const settings = ServerSettingsService.layerTest({
+          sourceControlHosts: {
+            "azure-devops-server": {
+              profiles: [
+                {
+                  apiCollectionUrl: "https://git.example.test/tfs/C",
+                  browserCollectionUrl: "https://web.example.test/tfs/C",
+                },
+              ],
+            },
+          },
+        });
+        const result = prResult({
+          status: "created",
+          number: 7,
+          url: "https://web.example.test/tfs/C/P/_git/Repo/pullrequest/7",
+        });
+        const agentLink = {
+          host: "git.example.test",
+          repository: "tfs/c/p/_git/repo",
+          number: 7,
+          url: "https://git.example.test/tfs/C/P/_git/Repo/pullrequest/7",
+          source: "agent" as const,
+          linkedAt: "2026-08-20T00:00:00.000Z",
+          snapshot: null,
+          stack: null,
+        };
+        const { commands, dispatch } = yield* recordingDispatch();
+        yield* linkCreatedPullRequest({ threadId: THREAD_ID, result, commandId }).pipe(
+          Effect.provide(layerDependenciesFor(dispatch, thread, settings)),
+        );
+        expect(yield* Ref.get(commands)).toHaveLength(1);
+        yield* linkCreatedPullRequest({ threadId: THREAD_ID, result, commandId }).pipe(
+          Effect.provide(
+            layerDependenciesFor(dispatch, { ...thread, pullRequests: [agentLink] }, settings),
+          ),
+        );
+        expect(yield* Ref.get(commands)).toHaveLength(1);
+      }),
   );
 
   it.effect("dispatches nothing when the action produced no pull request", () =>

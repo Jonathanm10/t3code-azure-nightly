@@ -7,13 +7,19 @@ import {
   type SourceControlProviderKind,
   type ThreadId,
 } from "@t3tools/contracts";
+import { azureDevOpsServerProfiles } from "@t3tools/shared/azureDevOps";
 import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
+import {
+  threadPullRequestKeysEqual,
+  threadPullRequestsOf,
+} from "@t3tools/shared/threadPullRequests";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 
 export interface CreatedPullRequestKey {
   readonly host: string;
@@ -52,7 +58,11 @@ export const linkCreatedPullRequest = <E>(input: {
   readonly threadId: ThreadId;
   readonly result: Pick<GitRunStackedActionResult, "pr">;
   readonly commandId: Effect.Effect<CommandId, E>;
-}): Effect.Effect<void, never, Orchestrator.OrchestratorV2 | ProjectService.ProjectService> =>
+}): Effect.Effect<
+  void,
+  never,
+  Orchestrator.OrchestratorV2 | ProjectService.ProjectService | ServerSettingsService
+> =>
   Effect.gen(function* () {
     const engine = yield* Orchestrator.OrchestratorV2;
     const projects = yield* ProjectService.ProjectService;
@@ -63,6 +73,17 @@ export const linkCreatedPullRequest = <E>(input: {
     const project = Option.getOrUndefined(yield* projects.getShell(thread.value.projectId));
     const key = createdPullRequestKey(input.result, project);
     if (key === null) return;
+    const profiles = yield* (yield* ServerSettingsService).getSettings.pipe(
+      Effect.map(azureDevOpsServerProfiles),
+      Effect.orElseSucceed(() => []),
+    );
+    if (
+      threadPullRequestsOf(thread.value).some(
+        (link) =>
+          link.source !== "stack-dismissed" && threadPullRequestKeysEqual(link, key, profiles),
+      )
+    )
+      return;
     const commandId = yield* input.commandId;
     yield* engine
       .dispatch({
