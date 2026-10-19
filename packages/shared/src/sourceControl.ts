@@ -6,12 +6,6 @@ import type {
 } from "@t3tools/contracts";
 import { resolveAzureDevOpsServerAddress } from "./azureDevOps.ts";
 
-export function canCreateChangeRequest(
-  provider: SourceControlProviderInfo | null | undefined,
-): boolean {
-  return provider?.kind !== "azure-devops-server";
-}
-
 export interface ChangeRequestPresentation {
   readonly icon:
     | "github"

@@ -59,7 +59,6 @@ import {
 import {
   canonicalRepositoryKey,
   getChangeRequestTerminologyForKind,
-  canCreateChangeRequest,
   detectSourceControlProviderFromRemoteUrl,
   isSshRemoteUrl,
   type ChangeRequestTerminology,
@@ -1946,13 +1945,6 @@ export const make = Effect.gen(function* () {
     }
 
     const openPr = latestOpenPr ?? explicitResultPr;
-    const canOfferPrCreation =
-      (result.action !== "push" && result.action !== "commit_push") ||
-      currentBranchIsDefault ||
-      openPr !== null ||
-      canCreateChangeRequest(
-        yield* resolveHostingProvider(cwd, finalBranchContext?.branch ?? null),
-      );
 
     const cta =
       result.action === "commit" && result.commit.status === "created"
@@ -1976,8 +1968,7 @@ export const make = Effect.gen(function* () {
             }
           : (result.action === "push" || result.action === "commit_push") &&
               result.push.status === "pushed" &&
-              !currentBranchIsDefault &&
-              canOfferPrCreation
+              !currentBranchIsDefault
             ? {
                 kind: "run_action" as const,
                 label: `Create ${terms.shortLabel}`,
@@ -3004,16 +2995,6 @@ export const make = Effect.gen(function* () {
           (input.action === "create_pr" &&
             (!initialStatus.hasUpstream || initialStatus.aheadCount > 0));
         const wantsPr = input.action === "create_pr" || input.action === "commit_push_pr";
-        if (
-          wantsPr &&
-          !canCreateChangeRequest(yield* resolveHostingProvider(input.cwd, initialStatus.branch))
-        ) {
-          return yield* new GitManagerError({
-            operation: "runStackedAction",
-            cwd: input.cwd,
-            detail: "Azure DevOps Server pull requests are read-only in T3.",
-          });
-        }
 
         if (input.featureBranch && !wantsCommit) {
           return yield* new GitManagerError({

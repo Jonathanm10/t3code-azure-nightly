@@ -1,4 +1,3 @@
-import { canCreateChangeRequest } from "@t3tools/shared/sourceControl";
 import type {
   GitRunStackedActionInput,
   GitStackedAction,
@@ -64,7 +63,6 @@ export function buildMenuItems(
     gitStatus.aheadCount > 0 &&
     (gitStatus.hasUpstream || canPushWithoutUpstream);
   const canCreatePr =
-    canCreateChangeRequest(gitStatus.sourceControlProvider) &&
     !isBusy &&
     hasBranch &&
     !hasOpenPr &&
@@ -148,7 +146,7 @@ export function resolveQuickAction(
     if (!gitStatus.hasUpstream && !hasOriginRemote) {
       return { label: "Commit", disabled: false, kind: "run_action", action: "commit" };
     }
-    if (hasOpenPr || isDefaultBranch || !canCreateChangeRequest(gitStatus.sourceControlProvider)) {
+    if (hasOpenPr || isDefaultBranch) {
       return { label: "Commit & push", disabled: false, kind: "run_action", action: "commit_push" };
     }
     return {
@@ -182,7 +180,7 @@ export function resolveQuickAction(
         hint: "No local commits to push.",
       };
     }
-    if (hasOpenPr || isDefaultBranch || !canCreateChangeRequest(gitStatus.sourceControlProvider)) {
+    if (hasOpenPr || isDefaultBranch) {
       return {
         label: "Push",
         disabled: false,
@@ -216,7 +214,7 @@ export function resolveQuickAction(
   }
 
   if (isAhead) {
-    if (hasOpenPr || isDefaultBranch || !canCreateChangeRequest(gitStatus.sourceControlProvider)) {
+    if (hasOpenPr || isDefaultBranch) {
       return {
         label: "Push",
         disabled: false,

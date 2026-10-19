@@ -1266,30 +1266,31 @@ describe("resolveAutoFeatureBranchName", () => {
   });
 });
 
-describe("read-only Server pull request actions", () => {
+describe("Azure DevOps Server pull request actions", () => {
   const server = {
     kind: SourceControlProviderKind.make("azure-devops-server"),
     name: "Azure DevOps Server",
     baseUrl: "https://git.example.test/C",
   };
-  it("disables Create PR on web and mobile and keeps ordinary Git actions", () => {
+  it("offers Create PR on web and mobile like any other host", () => {
     for (const build of [buildMenuItems, buildMobileMenuItems]) {
       const items = build(
         status({ sourceControlProvider: server, aheadCount: 1, aheadOfDefaultCount: 1 }),
         false,
       );
-      assert.strictEqual(items.find((item) => item.id === "pr")?.disabled, true);
-      assert.strictEqual(items.find((item) => item.id === "push")?.disabled, false);
+      assert.strictEqual(items.find((item) => item.id === "pr")?.disabled, false);
     }
     for (const resolve of [resolveQuickAction, resolveMobileQuickAction]) {
-      assert.strictEqual(
-        resolve(status({ sourceControlProvider: server, aheadCount: 1 }), false).action,
-        "push",
+      assert.deepInclude(
+        resolve(
+          status({ sourceControlProvider: server, aheadCount: 1, hasUpstream: false }),
+          false,
+        ),
+        { kind: "run_action", action: "create_pr", label: "Push & create PR" },
       );
-      assert.strictEqual(
-        resolve(status({ sourceControlProvider: server, hasWorkingTreeChanges: true }), false)
-          .action,
-        "commit_push",
+      assert.deepInclude(
+        resolve(status({ sourceControlProvider: server, hasWorkingTreeChanges: true }), false),
+        { kind: "run_action", action: "commit_push_pr", label: "Commit, push & PR" },
       );
     }
   });

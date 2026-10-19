@@ -31,7 +31,6 @@ import type {
   GitManagerServiceError,
   GitPreparePullRequestThreadInput,
   ModelSelection,
-  SourceControlProviderInfo,
 } from "@t3tools/contracts";
 
 import {
@@ -715,7 +714,6 @@ function preparePullRequestThread(
 function makeManager(input?: {
   ghScenario?: FakeGhScenario;
   sourceControlProvider?: SourceControlProvider["Service"];
-  sourceControlProviderInfo?: SourceControlProviderInfo;
   textGeneration?: Partial<FakeGitTextGeneration>;
   serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   setupScriptRunner?: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"];
@@ -814,18 +812,7 @@ function makeManager(input?: {
         SourceControlProviderRegistry.SourceControlProviderRegistry.of({
           resolveLink: (input) => provider.resolveLink?.(input),
           get: () => Effect.succeed(provider),
-          resolveHandle: () =>
-            Effect.succeed({
-              provider,
-              context:
-                input?.sourceControlProviderInfo === undefined
-                  ? null
-                  : {
-                      provider: input.sourceControlProviderInfo,
-                      remoteName: "origin",
-                      remoteUrl: "https://git.example.test/C/P/_git/Repo",
-                    },
-            }),
+          resolveHandle: () => Effect.succeed({ provider, context: null }),
           resolve: () => Effect.succeed(provider),
           discover: Effect.succeed([]),
         }),
@@ -3505,56 +3492,77 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
     }),
   );
 
-  it.effect("refuses read-only Server PR actions before committing or pushing", () =>
+  it.effect("creates a Server pull request after offering it on a plain push", () =>
     Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-server-readonly-");
+      const repoDir = yield* makeTempDir("t3code-server-pr-");
       yield* initRepo(repoDir);
       yield* runGit(repoDir, ["remote", "add", "origin", "https://git.example.test/C/P/_git/Repo"]);
+      const remote = yield* createBareRemote();
+      yield* runGit(repoDir, ["config", "remote.origin.pushurl", remote]);
       yield* runGit(repoDir, ["switch", "-c", "feature/server"]);
-      NodeFS.writeFileSync(NodePath.join(repoDir, "README.md"), "uncommitted changes\n");
-      const original = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
-      const forbidden = () =>
-        Effect.die("Server must refuse PR actions before any remote operation");
+      NodeFS.writeFileSync(NodePath.join(repoDir, "server.txt"), "server\n");
+      yield* runGit(repoDir, ["add", "server.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Add Server change"]);
+      const url = "https://web.example.test/C/P/_git/Repo/pullrequest/7";
+      const created: Array<Parameters<SourceControlProvider["Service"]["createChangeRequest"]>[0]> =
+        [];
+      const forbidden = () => Effect.die("Server PR creation must not need this operation");
       const provider: SourceControlProvider["Service"] = {
         kind: SourceControlProviderKind.make("azure-devops-server"),
-        listChangeRequests: () => Effect.succeed([]),
+        listChangeRequests: () =>
+          Effect.succeed(
+            created.map((input) => ({
+              provider: SourceControlProviderKind.make("azure-devops-server"),
+              number: 7,
+              title: input.title,
+              url,
+              baseRefName: input.baseRefName,
+              headRefName: input.headSelector,
+              state: "open" as const,
+              updatedAt: Option.none(),
+            })),
+          ),
         getDefaultBranch: () => Effect.succeed("main"),
+        createChangeRequest: (input) => Effect.sync(() => void created.push(input)),
         getChangeRequest: forbidden,
-        createChangeRequest: forbidden,
         getRepositoryCloneUrls: forbidden,
         createRepository: forbidden,
         checkoutChangeRequest: forbidden,
       };
       const { manager } = yield* makeManager({
         sourceControlProvider: provider,
-        sourceControlProviderInfo: {
-          kind: SourceControlProviderKind.make("azure-devops-server"),
-          name: "Azure DevOps Server",
-          baseUrl: "https://git.example.test/C",
+        serverSettings: {
+          sourceControlHosts: {
+            "azure-devops-server": {
+              profiles: [
+                {
+                  apiCollectionUrl: "https://git.example.test/C",
+                  browserCollectionUrl: "https://web.example.test/C",
+                },
+              ],
+            },
+          },
         },
       });
-      for (const action of ["commit_push_pr", "create_pr"] as const) {
-        const failure = yield* runStackedAction(manager, { cwd: repoDir, action }).pipe(
-          Effect.flip,
-        );
-        expect(failure.message).toContain("read-only");
-        expect((yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim()).toBe(original);
-      }
-      expect((yield* runGit(repoDir, ["status", "--porcelain"])).stdout).toContain("README.md");
-      const committed = yield* runStackedAction(manager, {
-        cwd: repoDir,
-        action: "commit",
-        commitMessage: "Commit on a Server repository",
-      });
-      expect(committed.commit.status).toBe("created");
-      const remote = yield* createBareRemote();
-      yield* runGit(repoDir, ["config", "remote.origin.pushurl", remote]);
+
       const pushed = yield* runStackedAction(manager, { cwd: repoDir, action: "push" });
       expect(pushed.push.status).toBe("pushed");
-      expect(pushed.toast.cta.kind).toBe("none");
-      expect(
-        (yield* runGit(remote, ["rev-parse", "refs/heads/feature/server"])).stdout.trim(),
-      ).toBe((yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim());
+      expect(pushed.toast.cta).toEqual({
+        kind: "run_action",
+        label: "Create PR",
+        action: { kind: "create_pr" },
+      });
+
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "create_pr" });
+      expect(created).toEqual([
+        expect.objectContaining({
+          baseRefName: "main",
+          headSelector: "feature/server",
+          title: "Add stacked git actions",
+        }),
+      ]);
+      expect(result.pr).toMatchObject({ status: "created", number: 7, url });
+      expect(result.toast.cta).toMatchObject({ kind: "open_pr", url });
     }),
   );
 

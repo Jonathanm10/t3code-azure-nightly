@@ -6,7 +6,6 @@ import { resolveAzureDevOpsServerAddress } from "./azureDevOps.ts";
 import { parseChangeRequestUrl, matchesLinkedPullRequestUrl } from "./changeRequestUrl.ts";
 import {
   detectSourceControlProviderFromRemoteUrl,
-  canCreateChangeRequest,
   resolveChangeRequestPresentation,
 } from "./sourceControl.ts";
 import { applyServerSettingsPatch } from "./serverSettings.ts";
@@ -56,13 +55,7 @@ describe("configured Azure DevOps Server collections", () => {
       profiles,
     );
     expect(configured?.kind).toBe("azure-devops-server");
-    expect(canCreateChangeRequest(configured)).toBe(false);
     expect(resolveChangeRequestPresentation(configured).checkoutCommandExample).toBeUndefined();
-    expect(
-      canCreateChangeRequest(
-        detectSourceControlProviderFromRemoteUrl("https://dev.azure.com/org/P/_git/R"),
-      ),
-    ).toBe(true);
   });
 
   it("rejects ambiguous and credential-bearing profile settings", () => {
