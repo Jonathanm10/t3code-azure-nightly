@@ -74,24 +74,67 @@ if (previousManifest) {
   )
     throw new Error("Last successful release provenance is invalid.");
 }
-if (
-  !shouldBuildNightly({
-    eventName: process.env.GITHUB_EVENT_NAME,
-    upstreamSha,
-    baseForkSha,
-    lastPublished,
-  })
-) {
+function summarize(text) {
+  if (process.env.GITHUB_STEP_SUMMARY) NodeFS.appendFileSync(process.env.GITHUB_STEP_SUMMARY, text);
+}
+function skipBuild(text) {
   if (process.env.GITHUB_OUTPUT)
     NodeFS.appendFileSync(process.env.GITHUB_OUTPUT, "should_build=false\n");
-  if (process.env.GITHUB_STEP_SUMMARY)
-    NodeFS.appendFileSync(
-      process.env.GITHUB_STEP_SUMMARY,
-      "Upstream Nightly and the maintained fork are unchanged. No build or release was created.\n",
-    );
+  summarize(text);
   process.exit(0);
 }
-git(["merge", "--no-edit", "--no-ff", upstreamSha]);
+const eventName = process.env.GITHUB_EVENT_NAME;
+if (!shouldBuildNightly({ eventName, upstreamSha, baseForkSha, lastPublished }))
+  skipBuild(
+    "Upstream Nightly and the maintained fork are unchanged. No build or release was created.\n",
+  );
+// An upstream conflict must not block fork fixes, so the fork keeps its current upstream base
+// until a hand resync, and only fails once that base falls a week behind.
+const maxUpstreamLagDays = 7;
+const commitTime = (sha) => Number(git(["show", "-s", "--format=%ct", sha]));
+function upstreamNightlyTagAt(sha) {
+  const refs = git([
+    "ls-remote",
+    "--tags",
+    `https://github.com/${upstreamRepository}.git`,
+    "v*-nightly.*",
+  ]);
+  for (const line of refs.split("\n")) {
+    const [refSha, ref = ""] = line.split("\t");
+    const tag = /^refs\/tags\/(v\d+\.\d+\.\d+-nightly\.\d{8}\.\d+)(?:\^\{\})?$/.exec(ref)?.[1];
+    if (tag && refSha === sha) return tag;
+  }
+  return null;
+}
+let built = { upstreamSha, upstreamTag: upstream.tag, upstreamReleaseId: upstream.releaseId };
+try {
+  git(["merge", "--no-edit", "--no-ff", upstreamSha]);
+} catch (error) {
+  const conflicts = git(["diff", "--name-only", "--diff-filter=U"]).split("\n").filter(Boolean);
+  if (conflicts.length === 0) throw error;
+  git(["merge", "--abort"]);
+  const baseUpstreamSha = git(["merge-base", "HEAD", upstreamSha]);
+  const baseUpstreamTag = upstreamNightlyTagAt(baseUpstreamSha) ?? "untagged upstream";
+  const lagDays = Math.floor((commitTime(upstreamSha) - commitTime(baseUpstreamSha)) / 86_400);
+  const report = [
+    `Upstream ${upstream.tag} conflicts with the fork in ${conflicts.length} files:`,
+    ...conflicts.map((path) => `- ${path}`),
+    `The fork stays on ${baseUpstreamTag} (${baseUpstreamSha}), ${lagDays} days behind.`,
+    "",
+  ].join("\n");
+  const resync = `Resync: merge ${upstream.tag} into azure-nightly by hand, then push azure-nightly and release-control.`;
+  if (
+    !shouldBuildNightly({ eventName, upstreamSha: baseUpstreamSha, baseForkSha, lastPublished })
+  ) {
+    if (lagDays > maxUpstreamLagDays) throw new Error(`${report}${resync}`, { cause: error });
+    skipBuild(`${report}The fork is unchanged since its last release. No build was created.\n`);
+  }
+  console.log(
+    `::warning::Upstream ${upstream.tag} conflicts; building the fork on ${baseUpstreamTag}.`,
+  );
+  summarize(`${report}Building the fork on its current upstream base.\n${resync}\n`);
+  built = { upstreamSha: baseUpstreamSha, upstreamTag: baseUpstreamTag, upstreamReleaseId: null };
+}
 const sourceSha = git(["rev-parse", "HEAD"]);
 const existingVersions = ownReleases
   .filter((release) => /^v\d+\.\d+\.\d+(?:-nightly\.\d{8}\.\d+)?$/.test(release.tag_name))
@@ -117,9 +160,7 @@ git(
 const provenance = {
   version,
   sourceSha,
-  upstreamSha,
-  upstreamTag: upstream.tag,
-  upstreamReleaseId: upstream.releaseId,
+  ...built,
   controllerSha: process.env.GITHUB_SHA,
 };
 NodeFS.writeFileSync(
@@ -129,5 +170,5 @@ NodeFS.writeFileSync(
 if (process.env.GITHUB_OUTPUT)
   NodeFS.appendFileSync(
     process.env.GITHUB_OUTPUT,
-    `should_build=true\nversion=${version}\nsource_sha=${sourceSha}\nupstream_sha=${upstreamSha}\nupstream_tag=${upstream.tag}\n`,
+    `should_build=true\nversion=${version}\nsource_sha=${sourceSha}\nupstream_sha=${built.upstreamSha}\nupstream_tag=${built.upstreamTag}\n`,
   );
