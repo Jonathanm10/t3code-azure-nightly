@@ -91,10 +91,15 @@ describe("parseChangeRequestUrl", () => {
       });
       expect.soft(matchesLinkedPullRequestUrl(linked, `${linked.url}?view=files`), host).toBe(true);
       expect.soft(matchesLinkedPullRequestUrl(linked, other.url), host).toBe(false);
-      expect.soft([linked, other].map(normalizeThreadPullRequestKey), host).toEqual([
-        { host: `${host}:8443`, repository, number: 123 },
-        { host: `${host}:9443`, repository, number: 123 },
-      ]);
+      expect
+        .soft(
+          [linked, other].map((key) => normalizeThreadPullRequestKey(key)),
+          host,
+        )
+        .toEqual([
+          { host: `${host}:8443`, repository, number: 123 },
+          { host: `${host}:9443`, repository, number: 123 },
+        ]);
     }
   });
 
