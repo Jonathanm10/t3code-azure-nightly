@@ -41,7 +41,6 @@ import type {
   RunAttemptId,
 } from "@t3tools/contracts";
 import {
-  OrchestrationV2DomainEventJson,
   OrchestrationV2AppThreadJson as OrchestrationV2AppThreadJsonSchema,
   OrchestrationV2CheckpointJson as OrchestrationV2CheckpointJsonSchema,
   OrchestrationV2CheckpointScopeJson as OrchestrationV2CheckpointScopeJsonSchema,
@@ -475,13 +474,6 @@ export interface ProjectionStoreV2Shape {
       | "contextTransfers"
       | "turnItems"
     > & { readonly hasConversation: boolean },
-    ProjectionStoreV2Error
-  >;
-  readonly getContextHandoffDeliveryEvents: (
-    threadId: ThreadId,
-    handoffIds: ReadonlyArray<OrchestrationV2ThreadProjection["contextHandoffs"][number]["id"]>,
-  ) => Effect.Effect<
-    ReadonlyArray<Extract<OrchestrationV2DomainEvent, { type: "context-handoff.updated" }>>,
     ProjectionStoreV2Error
   >;
   readonly getTurnStartHistory: (
@@ -1212,9 +1204,6 @@ const decodeCheckpointScopePayload = Schema.decodeUnknownEffect(
 );
 const decodeCheckpointPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2CheckpointJsonSchema),
-);
-const decodeContextHandoffEvent = Schema.decodeEffect(
-  Schema.fromJsonString(OrchestrationV2DomainEventJson),
 );
 const decodeContextHandoffPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2ContextHandoffJsonSchema),
@@ -4117,34 +4106,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ),
         );
 
-    const getContextHandoffDeliveryEvents: ProjectionStoreV2Shape["getContextHandoffDeliveryEvents"] =
-      (threadId, handoffIds) =>
-        Effect.gen(function* () {
-          if (handoffIds.length === 0) return [];
-          const rows = yield* sql<{ event_json: string }>`
-          SELECT json_set(metadata_json,
-            '$.id', event_id, '$.threadId', stream_id, '$.type', event_type,
-            '$.occurredAt', occurred_at, '$.payload', json(payload_json)
-          ) AS event_json
-          FROM orchestration_events
-          WHERE application_event_version = 2 AND aggregate_kind = 'thread'
-            AND stream_id = ${threadId} AND event_type = 'context-handoff.updated'
-            AND sequence IN (
-              SELECT MAX(sequence) FROM orchestration_events
-              WHERE application_event_version = 2 AND aggregate_kind = 'thread'
-                AND stream_id = ${threadId} AND event_type = 'context-handoff.updated'
-                AND json_extract(payload_json, '$.id') IN ${sql.in(handoffIds)}
-                AND json_type(payload_json, '$.delivery') = 'object'
-              GROUP BY json_extract(payload_json, '$.id')
-            )
-          ORDER BY sequence ASC
-        `;
-          const events = yield* Effect.forEach(rows, (row) =>
-            decodeContextHandoffEvent(row.event_json),
-          );
-          return events.filter((event) => event.type === "context-handoff.updated");
-        }).pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
-
     const getTurnStartHistory: ProjectionStoreV2Shape["getTurnStartHistory"] = (threadId, runIds) =>
       Effect.gen(function* () {
         const rows = yield* sql<PayloadRow>`
@@ -6299,7 +6260,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThreadWorktreePaths,
       getThreadProjection,
       getTurnStartContext,
-      getContextHandoffDeliveryEvents,
       getTurnStartHistory,
       getRuntimeRecoveryProjection,
       getRunningTurnContext,
@@ -6339,9 +6299,6 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
   Effect.gen(function* () {
     const replayState = yield* Ref.make(makeProjectionReplayState());
     const sequence = yield* Ref.make(0);
-    const deliveryEvents = yield* Ref.make<
-      ReadonlyArray<Extract<OrchestrationV2DomainEvent, { type: "context-handoff.updated" }>>
-    >([]);
 
     const service: ProjectionStoreV2Shape = {
       apply: (event) =>
@@ -6364,11 +6321,6 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           if (result) {
             return yield* result;
           }
-          if (event.type === "context-handoff.updated" && event.payload.delivery !== undefined)
-            yield* Ref.update(deliveryEvents, (events) => [
-              ...events.filter((old) => old.payload.id !== event.payload.id),
-              event,
-            ]);
           yield* Ref.update(sequence, (current) => current + 1);
         }),
       getShellSnapshot: (options) =>
@@ -6999,14 +6951,6 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             ),
             turnItems: projection.turnItems.filter((item) => item.runId === runId),
           })),
-        ),
-      getContextHandoffDeliveryEvents: (threadId, handoffIds) =>
-        Ref.get(deliveryEvents).pipe(
-          Effect.map((events) =>
-            events.filter(
-              (event) => event.threadId === threadId && handoffIds.includes(event.payload.id),
-            ),
-          ),
         ),
       getTurnStartHistory: (threadId, runIds) =>
         service

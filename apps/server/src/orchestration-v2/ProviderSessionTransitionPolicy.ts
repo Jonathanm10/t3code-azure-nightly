@@ -31,15 +31,6 @@ export interface ProviderSessionTransitionTarget extends ProviderSessionTransiti
   readonly available: boolean;
 }
 
-export function continuationIdentitiesEqual(
-  current: ProviderContinuationIdentity,
-  target: ProviderContinuationIdentity,
-): boolean {
-  return (
-    current.driverKind === target.driverKind && current.continuationKey === target.continuationKey
-  );
-}
-
 export function decideProviderSessionTransition(input: {
   readonly current: ProviderSessionTransitionState | null;
   readonly target: ProviderSessionTransitionTarget;
@@ -54,10 +45,9 @@ export function decideProviderSessionTransition(input: {
 
   const current = input.current;
   const target = input.target;
-  const continuationCompatible = continuationIdentitiesEqual(
-    current.continuationIdentity,
-    target.continuationIdentity,
-  );
+  const continuationCompatible =
+    current.continuationIdentity.driverKind === target.continuationIdentity.driverKind &&
+    current.continuationIdentity.continuationKey === target.continuationIdentity.continuationKey;
   if (!continuationCompatible || current.driver !== target.driver) {
     return { type: "create_with_handoff" };
   }

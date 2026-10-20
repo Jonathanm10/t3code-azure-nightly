@@ -66,21 +66,6 @@ export class ProviderAdapterRegistryV2 extends Context.Service<
   ProviderAdapterRegistryV2Shape
 >()("t3/orchestration-v2/ProviderAdapterRegistry/ProviderAdapterRegistryV2") {}
 
-export const getContinuationMetadata = Effect.fnUntraced(function* (
-  instanceId: ProviderInstanceId,
-) {
-  const adapters = yield* ProviderAdapterRegistryV2;
-  if (adapters.getMetadata !== undefined) return yield* adapters.getMetadata(instanceId);
-  const adapter = yield* adapters.get(instanceId);
-  const capabilities = yield* adapter.getCapabilities();
-  return {
-    driver: adapter.driver,
-    continuationKey: `${adapter.driver}:instance:${instanceId}`,
-    enabled: true,
-    capabilities,
-  };
-});
-
 export const layerFromProviderInstanceRegistry: Layer.Layer<
   ProviderAdapterRegistryV2,
   never,
