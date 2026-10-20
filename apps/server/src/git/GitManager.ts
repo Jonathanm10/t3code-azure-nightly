@@ -1984,16 +1984,39 @@ export const make = Effect.gen(function* () {
     };
   });
 
-  const resolveBaseBranch = Effect.fn("resolveBaseBranch")(function* (
+  const resolvePrBase = Effect.fn("resolvePrBase")(function* (
     cwd: string,
     branch: string,
     upstreamRef: string | null,
     headContext: Pick<BranchHeadContext, "isCrossRepository" | "remoteName">,
   ) {
+    const configuredRef = yield* gitCore.readConfigValue(cwd, `branch.${branch}.t3-merge-base-ref`);
+    if (configuredRef?.startsWith("refs/heads/") || configuredRef?.startsWith("refs/remotes/")) {
+      const configuredBranch = yield* gitCore.resolveBranchName(cwd, configuredRef);
+      if (configuredBranch) return { baseBranch: configuredBranch, baseRef: configuredRef };
+    }
+
     const configured = yield* gitCore.readConfigValue(cwd, `branch.${branch}.gh-merge-base`);
     if (configured) {
+      const localRef = configured.startsWith("refs/") ? configured : `refs/heads/${configured}`;
+      const localBranch = yield* gitCore.resolveBranchName(cwd, localRef);
+      if (localBranch) {
+        const shadowsRemote =
+          configured.includes("/") &&
+          !configured.startsWith("refs/") &&
+          (yield* gitCore.resolveBranchName(cwd, `refs/remotes/${configured}`)) !== null;
+        return {
+          baseBranch: localBranch,
+          baseRef: configured.startsWith("refs/") || shadowsRemote ? localRef : localBranch,
+        };
+      }
+      if (configured.includes("/") && !configured.startsWith("refs/")) {
+        const remoteRef = `refs/remotes/${configured}`;
+        const remoteBranch = yield* gitCore.resolveBranchName(cwd, remoteRef);
+        if (remoteBranch) return { baseBranch: remoteBranch, baseRef: remoteRef };
+      }
       const configuredBranch = yield* gitCore.resolveBranchName(cwd, configured);
-      if (configuredBranch) return configuredBranch;
+      if (configuredBranch) return { baseBranch: configuredBranch, baseRef: configuredBranch };
     }
 
     if (upstreamRef && !headContext.isCrossRepository) {
@@ -2001,7 +2024,7 @@ export const make = Effect.gen(function* () {
         remoteName: headContext.remoteName,
       });
       if (upstreamBranch.length > 0 && upstreamBranch !== branch) {
-        return upstreamBranch;
+        return { baseBranch: upstreamBranch, baseRef: upstreamBranch };
       }
     }
 
@@ -2010,7 +2033,7 @@ export const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => null),
     );
     if (defaultFromProvider) {
-      return defaultFromProvider;
+      return { baseBranch: defaultFromProvider, baseRef: defaultFromProvider };
     }
 
     const defaultFromRemote = yield* gitCore.resolvePrimaryRemoteName(cwd).pipe(
@@ -2018,16 +2041,17 @@ export const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => null),
     );
     if (defaultFromRemote) {
-      return defaultFromRemote;
+      return { baseBranch: defaultFromRemote, baseRef: defaultFromRemote };
     }
 
-    return "main";
+    return { baseBranch: "main", baseRef: "main" };
   });
 
   const resolveBaseRangeRef = Effect.fn("resolveBaseRangeRef")(function* (
     cwd: string,
     baseBranch: string,
   ) {
+    if (baseBranch.startsWith("refs/")) return baseBranch;
     const remoteName = yield* gitCore
       .resolvePrimaryRemoteName(cwd)
       .pipe(Effect.orElseSucceed(() => null));
@@ -2252,13 +2276,18 @@ export const make = Effect.gen(function* () {
       };
     }
 
-    const baseBranch = yield* resolveBaseBranch(cwd, branch, details.upstreamRef, headContext);
+    const { baseBranch, baseRef } = yield* resolvePrBase(
+      cwd,
+      branch,
+      details.upstreamRef,
+      headContext,
+    );
     yield* emit({
       kind: "phase_started",
       phase: "pr",
       label: `Generating ${terms.shortLabel} content...`,
     });
-    const baseRangeRef = yield* resolveBaseRangeRef(cwd, baseBranch);
+    const baseRangeRef = yield* resolveBaseRangeRef(cwd, baseRef);
     const rangeContext = yield* gitCore.readRangeContext(cwd, baseRangeRef);
     const policy = yield* resolveStylePolicy(cwd, settings);
     const changeRequestTemplate =

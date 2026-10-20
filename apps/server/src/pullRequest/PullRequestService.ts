@@ -390,11 +390,11 @@ function listCursorAt(
   fetched: ReadonlyArray<ProviderChangeRequest>,
   deliveredCount: number,
 ): string {
-  const seenAt = [
+  const seenAt = new Set([
     ...(previous?.updatedBefore === boundary ? previous.seenAt : []),
     ...fetched.filter((item) => item.updatedAt === boundary).map((item) => item.number),
-  ];
-  return `${boundary}|${(previous?.delivered ?? 0) + deliveredCount}|${seenAt.join(",")}`;
+  ]);
+  return `${boundary}|${(previous?.delivered ?? 0) + deliveredCount}|${[...seenAt].join(",")}`;
 }
 
 function isProviderUnusable(error: PullRequestProviderError): boolean {
@@ -1343,7 +1343,11 @@ export const make = Effect.gen(function* () {
               ...(cursor === undefined
                 ? {}
                 : {
-                    cursor: { updatedBefore: cursor.updatedBefore, delivered: cursor.delivered },
+                    cursor: {
+                      updatedBefore: cursor.updatedBefore,
+                      delivered: cursor.delivered,
+                      seenAt: cursor.seenAt,
+                    },
                   }),
             })
             .pipe(
@@ -1938,7 +1942,7 @@ export const make = Effect.gen(function* () {
           // Deliberately not `invalidatedByMutation`: ticking a file off says nothing about the
           // change request, and dropping a 300-file diff on every checkbox is the whole cost of
           // the feature.
-          Effect.tap(() => Effect.sync(() => bumpFilesViewedEpoch(ref))),
+          Effect.ensuring(Effect.sync(() => bumpFilesViewedEpoch(ref))),
         ),
       ),
     );

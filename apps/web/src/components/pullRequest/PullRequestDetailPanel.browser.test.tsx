@@ -1,5 +1,7 @@
 import {
   EnvironmentId,
+  GitCommandError,
+  GitManagerError,
   ProjectId,
   SourceControlProviderKind,
   ThreadId,
@@ -10,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts/settings";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
+import * as Cause from "effect/Cause";
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -18,11 +21,16 @@ import { DraftId, useComposerDraftStore } from "~/composerDraftStore";
 
 import "~/index.css";
 
-const { newThread, prepareThread, refresh } = vi.hoisted(() => ({
-  newThread: vi.fn(),
-  prepareThread: vi.fn(),
-  refresh: vi.fn(),
-}));
+const { newThread, prepareThread, refresh, addToast, updateToast, checkoutState } = vi.hoisted(
+  () => ({
+    newThread: vi.fn(),
+    prepareThread: vi.fn(),
+    refresh: vi.fn(),
+    addToast: vi.fn(),
+    updateToast: vi.fn(),
+    checkoutState: { error: null as Error | null },
+  }),
+);
 
 vi.mock(import("~/state/session"), async (original) => ({
   ...(await original()),
@@ -59,7 +67,7 @@ vi.mock(import("~/lib/sourceControlActions"), async (original) => ({
   usePreparePullRequestThreadAction: (() => ({
     run: prepareThread,
     isAllowed: true,
-    error: null,
+    error: checkoutState.error,
   })) as never,
 }));
 vi.mock(import("~/state/use-atom-command"), async (original) => ({
@@ -166,6 +174,14 @@ vi.mock(import("./PullRequestCodeTab"), async (original) => ({
     </div>
   )) as never,
 }));
+
+vi.mock(import("../ui/toast"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    toastManager: { ...actual.toastManager, add: addToast, update: updateToast } as never,
+  };
+});
 
 import { PullRequestDetailPanel } from "./PullRequestDetailPanel";
 import { pullRequestPanelContext } from "./pullRequestDetail.logic";
@@ -275,6 +291,9 @@ beforeEach(() => {
   newThread
     .mockReset()
     .mockResolvedValue({ draftId: newDraftId, threadId: ThreadId.make("new-thread") });
+  addToast.mockReset().mockReturnValue("checkout-toast");
+  updateToast.mockReset();
+  checkoutState.error = null;
   prepareThread.mockReset().mockResolvedValue({
     _tag: "Success",
     value: { branch: "feature", worktreePath: "/workspace/pr" },
@@ -552,4 +571,33 @@ describe("configured Azure Server read-only panel", () => {
       expect(prepareThread).not.toHaveBeenCalled();
     },
   );
+});
+
+it("shows the current checkout recovery detail on the first failure and on retry", async () => {
+  const first = new GitManagerError({
+    cwd: "/workspace",
+    operation: "preparePullRequestThread",
+    detail: "This PR branch is already checked out in the main repo. Use Local.",
+  });
+  const second = new GitCommandError({
+    cwd: "/workspace",
+    operation: "GitVcsDriver.createWorktree",
+    command: "git worktree add",
+    detail: "The worktree directory already exists. Choose another directory.",
+  });
+  await render();
+
+  for (const [index, error] of [first, second].entries()) {
+    prepareThread.mockImplementationOnce(async () => {
+      checkoutState.error = error;
+      return { _tag: "Failure", cause: Cause.fail(error) };
+    });
+    await page.getByRole("button", { name: "Check out", exact: true }).click();
+    await page.getByRole("menuitem", { name: /In a separate worktree/ }).click();
+    await vi.waitFor(() => expect(updateToast).toHaveBeenCalledTimes(index + 1));
+  }
+  expect(updateToast.mock.calls.map(([, toast]) => toast.description)).toEqual([
+    expect.stringContaining(first.detail),
+    second.detail,
+  ]);
 });

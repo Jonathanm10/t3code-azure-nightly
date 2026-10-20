@@ -516,6 +516,7 @@ export const layer: Layer.Layer<
         thread: projection.thread,
         modelSelection: run.modelSelection,
       });
+      if (!(yield* isCurrentAttemptInStatus("starting"))) return;
       const existingSessionProjection = projection.providerSessions.find(
         (candidate) => candidate.id === providerSessionId,
       );
@@ -578,6 +579,7 @@ export const layer: Layer.Layer<
         return;
       }
       const session = sessionResult.success;
+      if (!(yield* isCurrentAttemptInStatus("starting"))) return;
       const loadFromProvider = (
         load: Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapter.ProviderAdapterV2Error>,
       ) =>
