@@ -291,6 +291,7 @@ describe("DesktopLinuxUrlHandler", () => {
           displayName: "T3 Code (Alpha)",
           execTarget: process.execPath,
           scheme: "t3code",
+          aliases: ["t3code-azure"],
           iconPath: "/home/alice/.local/share/icons/com.t3tools.T3Code.desktop.png",
         }),
       );
