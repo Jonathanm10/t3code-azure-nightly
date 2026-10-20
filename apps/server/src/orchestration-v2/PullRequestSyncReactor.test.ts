@@ -1289,7 +1289,7 @@ describe("PullRequestSyncReactor", () => {
 });
 
 it.effect(
-  "isolates Server project refreshes and retains a refresh until every group succeeds",
+  "isolates Server project refreshes and retains a failed project's refresh until it succeeds",
   () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1345,14 +1345,14 @@ it.effect(
           assert.deepStrictEqual(invalidated.sort(), [a, b]);
           failB = false;
           yield* sweepAgain(fixture, reactor);
-          assert.deepStrictEqual(invalidated.sort(), [a, a, b, b]);
+          assert.deepStrictEqual(invalidated.sort(), [a, b, b]);
           const answers = yield* Ref.get(fixture.syncCommands);
           assert.strictEqual(
             answers.findLast((command) => command.threadId === ThreadId.make("b"))?.snapshot.title,
             b,
           );
           yield* sweepAgain(fixture, reactor);
-          assert.strictEqual(invalidated.length, 4);
+          assert.strictEqual(invalidated.length, 3);
         }).pipe(Effect.provide(fixture.layer));
       }),
     ),
